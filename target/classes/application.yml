@@ -1,0 +1,27 @@
+server:
+  address: 0.0.0.0       # <-- listen on all interfaces (LAN)
+  port: 8080
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/taptaptips
+    username: tapuser
+    password: password
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate.jdbc.time_zone: UTC
+      hibernate.format_sql: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+jwt:
+  issuer: taptaptips
+  accessTtlMinutes: 15
+  refreshTtlDays: 14
+  secret: "change-me-super-secret-32bytes-minimum-change-me"
