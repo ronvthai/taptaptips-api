@@ -4,4 +4,7 @@ import com.taptaptips.server.domain.Tip
 import org.springframework.data.jpa.repository.JpaRepository
 import java.util.*
 
-interface TipRepository : JpaRepository<Tip, UUID>
+interface TipRepository : JpaRepository<Tip, UUID> {
+    // Use nested path for the relation:
+    fun existsBySender_IdAndNonce(senderId: UUID, nonce: String): Boolean
+}
