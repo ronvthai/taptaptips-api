@@ -1,18 +1,7 @@
 server:
-  address: 0.0.0.0       # <-- listen on all interfaces (LAN)
-  port: 8080
+  address: 0.0.0.0
 
 spring:
-  datasource:
-    url: jdbc:postgresql://localhost:5432/taptaptips
-    username: postgres
-    password: password
-  # jpa:
-  #   hibernate:
-  #     ddl-auto: validate
-  #   properties:
-  #     hibernate.jdbc.time_zone: UTC
-  #     hibernate.format_sql: true
   jpa:
     hibernate:
       ddl-auto: update
@@ -21,13 +10,3 @@ management:
     web:
       exposure:
         include: health,info
-
-jwt:
-  issuer: taptaptips
-  accessTtlMinutes: 15
-  refreshTtlDays: 14
-  secret: "C85QjjFPsE7jv_EeqHPnOSQ3qA2wKB7VskKB4ETAUEfMiB5pdxmK4S-zmXGENV-mgQaftktN-19wk8YL_sHCCg"
-
-crypto:
-  bank:
-    key-base64: "edeBBGBYA6hz8NsYh120Q0cHfXb0b94zO3LpyxoOr9E="

@@ -1,0 +1,24 @@
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:}
+    username: ${SPRING_DATASOURCE_USERNAME:}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+  jpa:
+    hibernate:
+      ddl-auto: update
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+jwt:
+  issuer: taptaptips
+  accessTtlMinutes: 15
+  refreshTtlDays: 14
+  secret: ${JWT_SECRET}
+
+crypto:
+  bank:
+    key-base64: ${CRYPTO_BANK_KEY_BASE64:}
