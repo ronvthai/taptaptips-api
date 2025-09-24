@@ -1,30 +1,21 @@
 services:
   - type: web
-    name: taptaptips-server
+    name: taptaptips-api
     env: docker
-    plan: free
-    autoDeploy: true
-    region: oregon
+    plan: starter
     healthCheckPath: /actuator/health
+    autoDeploy: true
     envVars:
+      - key: SPRING_PROFILES_ACTIVE
+        value: prod
       - key: DATABASE_URL
-        fromDatabase: { name: taptaptips-db, property: connectionString }
-      - key: JWT_SECRET
-        generateValue: true
-      - key: JWT_ISSUER
-        value: taptaptips
-      - key: JWT_ACCESS_TTL_MINUTES
-        value: "120"
-      - key: CRYPTO_BANK_KEY_BASE64
-        generateValue: true
-      - key: SPRING_DATASOURCE_HIKARI_INITIALIZATION_FAIL_TIMEOUT
-        value: "60000"
-      - key: SPRING_JPA_DEFER_DATASOURCE_INITIALIZATION
-        value: "true"
-      - key: SPRING_SQL_INIT_MODE
-        value: "never"
+        fromDatabase:
+          name: taptaptips-db
+          property: connectionString
+      - key: JAVA_TOOL_OPTIONS
+        value: "-XX:+AlwaysActAsServerClassMachine -XX:+UseContainerSupport -Xms256m -Xmx512m"
+    dockerfilePath: ./Dockerfile
 
 databases:
   - name: taptaptips-db
-    plan: free
-    # postgresMajorVersion: 16   # optional; omit if it caused the downgrade error
+    plan: starter

@@ -1,25 +1,19 @@
-# ---- build stage ----
-FROM maven:3.9.8-eclipse-temurin-21 AS build
+# Build stage (use your tool: maven or gradle)
+FROM eclipse-temurin:21-jdk AS build
 WORKDIR /app
-
-# cache dependencies
-COPY pom.xml ./
-RUN mvn -q -DskipTests dependency:go-offline
-
-# copy source and build
 COPY . .
-RUN mvn -q -DskipTests clean package
+# If Maven repo:
+# RUN ./mvnw -q -DskipTests package
+# If Gradle repo:
+RUN ./gradlew -q -Dorg.gradle.daemon=false -x test bootJar || ./gradlew -q -Dorg.gradle.daemon=false -x test build
 
-# ---- run stage ----
+# Runtime stage
 FROM eclipse-temurin:21-jre
 WORKDIR /app
-COPY --from=build /app/target/*SNAPSHOT*.jar app.jar
-
-# JVM tuning for containers
-ENV JAVA_OPTS="-XX:+UseContainerSupport -XX:MaxRAMPercentage=75 -XX:InitialRAMPercentage=50 -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8"
-
-# Port Render (or other platforms) injects as $PORT
+# Copy built jars (both Gradle and Maven patterns covered)
+COPY --from=build /app/build/libs/*.jar /app/build/libs/ 2>/dev/null || true
+COPY --from=build /app/target/*.jar    /app/target/       2>/dev/null || true
+COPY render-start.sh /app/render-start.sh
+RUN chmod +x /app/render-start.sh
 ENV PORT=8080
-EXPOSE 8080
-
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]
+CMD ["/app/render-start.sh"]
