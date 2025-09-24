@@ -18,4 +18,4 @@ services:
 
 databases:
   - name: taptaptips-db
-    plan: starter
+    plan: basic-256mb
