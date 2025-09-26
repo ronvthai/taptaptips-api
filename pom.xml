@@ -99,43 +99,76 @@
       </plugin>
 
       <plugin>
-        <groupId>org.jetbrains.kotlin</groupId>
-        <artifactId>kotlin-maven-plugin</artifactId>
-        <version>${kotlin.version}</version>
-        <dependencies>
-          <dependency>
-            <groupId>org.jetbrains.kotlin</groupId>
-            <artifactId>kotlin-maven-allopen</artifactId>
-            <version>${kotlin.version}</version>
-          </dependency>
-          <dependency>
-            <groupId>org.jetbrains.kotlin</groupId>
-            <artifactId>kotlin-maven-noarg</artifactId>
-            <version>${kotlin.version}</version>
-          </dependency>
-        </dependencies>
-        <executions>
-          <execution>
-            <id>compile</id>
-            <phase>compile</phase>
-            <goals><goal>compile</goal></goals>
-            <configuration>
-              <jvmTarget>17</jvmTarget>
-              <args><arg>-Xjsr305=strict</arg></args>
-              <compilerPlugins>
-                <plugin>spring</plugin>
-                <plugin>jpa</plugin>
-              </compilerPlugins>
-            </configuration>
-          </execution>
-          <execution>
-            <id>test-compile</id>
-            <phase>test-compile</phase>
-            <goals><goal>test-compile</goal></goals>
-            <configuration><jvmTarget>17</jvmTarget></configuration>
-          </execution>
-        </executions>
-      </plugin>
+  <groupId>org.jetbrains.kotlin</groupId>
+  <artifactId>kotlin-maven-plugin</artifactId>
+  <version>${kotlin.version}</version>
+
+  <!-- These deps are fine to keep, but not strictly required when using <compilerPlugins> -->
+  <dependencies>
+    <dependency>
+      <groupId>org.jetbrains.kotlin</groupId>
+      <artifactId>kotlin-maven-allopen</artifactId>
+      <version>${kotlin.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.jetbrains.kotlin</groupId>
+      <artifactId>kotlin-maven-noarg</artifactId>
+      <version>${kotlin.version}</version>
+    </dependency>
+  </dependencies>
+
+  <executions>
+    <execution>
+      <id>compile</id>
+      <phase>compile</phase>
+      <goals>
+        <goal>compile</goal>
+      </goals>
+      <configuration>
+        <jvmTarget>17</jvmTarget>
+        <args>
+          <arg>-Xjsr305=strict</arg>
+          <arg>-java-parameters</arg>
+        </args>
+
+        <!-- Open Spring & JPA classes/methods so Hibernate can proxy -->
+        <compilerPlugins>
+          <plugin>spring</plugin>
+          <plugin>jpa</plugin>
+          <plugin>no-arg</plugin>
+        </compilerPlugins>
+
+        <!-- Generate no-arg constructors for JPA types -->
+        <pluginOptions>
+          <option>no-arg:annotation=jakarta.persistence.Entity</option>
+          <option>no-arg:annotation=jakarta.persistence.Embeddable</option>
+          <option>no-arg:annotation=jakarta.persistence.MappedSuperclass</option>
+        </pluginOptions>
+      </configuration>
+    </execution>
+
+    <execution>
+      <id>test-compile</id>
+      <phase>test-compile</phase>
+      <goals>
+        <goal>test-compile</goal>
+      </goals>
+      <configuration>
+        <jvmTarget>17</jvmTarget>
+        <args>
+          <arg>-Xjsr305=strict</arg>
+          <arg>-java-parameters</arg>
+        </args>
+        <compilerPlugins>
+          <plugin>spring</plugin>
+          <plugin>jpa</plugin>
+          <plugin>no-arg</plugin>
+        </compilerPlugins>
+      </configuration>
+    </execution>
+  </executions>
+</plugin>
+
 
       <plugin>
         <groupId>org.springframework.boot</groupId>
