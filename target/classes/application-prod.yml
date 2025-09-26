@@ -27,13 +27,3 @@ jwt:
 crypto:
   bank:
     key-base64: ${CRYPTO_BANK_KEY_BASE64}
-    
-management:
-  endpoints:
-    web:
-      exposure:
-        include: health,info
-  endpoint:
-    health:
-      probes:
-        enabled: true
