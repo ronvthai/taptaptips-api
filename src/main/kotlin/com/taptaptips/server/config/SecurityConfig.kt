@@ -33,6 +33,7 @@ class SecurityConfig {
     @Bean
     @Order(1)
     fun appChain(http: HttpSecurity): SecurityFilterChain {
+        
         http
             .csrf { it.disable() }
             .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
