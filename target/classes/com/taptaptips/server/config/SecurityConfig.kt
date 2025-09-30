@@ -1,52 +1,49 @@
 package com.taptaptips.server.config
 
-import com.taptaptips.server.security.JwtAuthFilter
-import com.taptaptips.server.security.JwtService
+import org.springframework.boot.actuate.autoconfigure.security.servlet.EndpointRequest
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
-import org.springframework.http.HttpMethod
+import org.springframework.core.annotation.Order
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity
 import org.springframework.security.config.http.SessionCreationPolicy
 import org.springframework.security.web.SecurityFilterChain
-import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter
-import org.springframework.web.cors.CorsConfiguration
-import org.springframework.web.cors.CorsConfigurationSource
-import org.springframework.web.cors.UrlBasedCorsConfigurationSource
 
 @Configuration
 @EnableWebSecurity
-class SecurityConfig(
-    private val jwtService: JwtService
-) {
+class SecurityConfig {
 
+    // Chain 0: All Actuator endpoints -> always permit (so /actuator/health returns 200)
     @Bean
-fun filterChain(http: HttpSecurity, jwt: JwtService): SecurityFilterChain {
-    http
-        .csrf { it.disable() } // REST: disable CSRF or you’ll get 403 on POST
-        .cors { }              // keep your CORS bean
-        .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
-        .authorizeHttpRequests { auth ->
-            auth
-                .requestMatchers(HttpMethod.POST, "/auth/**").permitAll()
-                .requestMatchers(HttpMethod.GET, "/health").permitAll()
-                .requestMatchers(HttpMethod.POST, "/devices").authenticated()
-                .requestMatchers(HttpMethod.POST, "/tips").authenticated() // <= only needs auth
-                .anyRequest().authenticated()
-        }
-        .addFilterBefore(JwtAuthFilter(jwt), UsernamePasswordAuthenticationFilter::class.java)
+    @Order(0)
+    fun actuatorChain(http: HttpSecurity): SecurityFilterChain {
+        http
+            .securityMatcher(EndpointRequest.toAnyEndpoint())
+            .authorizeHttpRequests { it.anyRequest().permitAll() }
+            .csrf { it.disable() }
+            .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
+            .httpBasic { it.disable() }
+            .formLogin { it.disable() }
+            .logout { it.disable() }
+        return http.build()
+    }
 
-    return http.build()
-}
-
-
+    // Chain 1: App endpoints
+    // TEMPORARILY permit all so we can prove health; once green, switch to .authenticated() and add your JWT filter.
     @Bean
-    fun corsConfigurationSource(): CorsConfigurationSource =
-        UrlBasedCorsConfigurationSource().apply {
-            val c = CorsConfiguration()
-            c.allowedOriginPatterns = listOf("*") // dev only; tighten for prod
-            c.allowedMethods = listOf("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
-            c.allowedHeaders = listOf("*")
-            registerCorsConfiguration("/**", c)
-        }
+    @Order(1)
+    fun appChain(http: HttpSecurity): SecurityFilterChain {
+        http
+            .csrf { it.disable() }
+            .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
+            .authorizeHttpRequests { auth ->
+                auth
+                    .requestMatchers("/", "/healthz").permitAll() // public simple probe
+                    .anyRequest().permitAll()                     // <--- TEMPORARY
+            }
+            .httpBasic { it.disable() }
+            .formLogin { it.disable() }
+            .logout { it.disable() }
+        return http.build()
+    }
 }
