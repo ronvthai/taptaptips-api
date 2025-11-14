@@ -4,18 +4,19 @@ server:
 
 spring:
   datasource:
-    url: jdbc:postgresql://localhost:5432/taptaptips
-    username: postgres
-    password: password
-  # jpa:
-  #   hibernate:
-  #     ddl-auto: validate
-  #   properties:
-  #     hibernate.jdbc.time_zone: UTC
-  #     hibernate.format_sql: true
+    # Local default for dev, overridden in Render by env var
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/taptaptips}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:password}
+    driver-class-name: org.postgresql.Driver
+
   jpa:
     hibernate:
       ddl-auto: update
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
 management:
   endpoints:
     web:
