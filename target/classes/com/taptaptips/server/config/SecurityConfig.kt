@@ -1,7 +1,6 @@
 package com.taptaptips.server.config
 
 import com.taptaptips.server.security.JwtAuthFilter
-import com.taptaptips.server.security.JwtService
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.http.HttpMethod
@@ -17,28 +16,32 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource
 @Configuration
 @EnableWebSecurity
 class SecurityConfig(
-    private val jwtService: JwtService
+    private val jwtAuthFilter: JwtAuthFilter
 ) {
 
     @Bean
-fun filterChain(http: HttpSecurity, jwt: JwtService): SecurityFilterChain {
-    http
-        .csrf { it.disable() } // REST: disable CSRF or you’ll get 403 on POST
-        .cors { }              // keep your CORS bean
-        .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
-        .authorizeHttpRequests { auth ->
-            auth
-                .requestMatchers(HttpMethod.POST, "/auth/**").permitAll()
-                .requestMatchers(HttpMethod.GET, "/health").permitAll()
-                .requestMatchers(HttpMethod.POST, "/devices").authenticated()
-                .requestMatchers(HttpMethod.POST, "/tips").authenticated() // <= only needs auth
-                .anyRequest().authenticated()
-        }
-        .addFilterBefore(JwtAuthFilter(jwt), UsernamePasswordAuthenticationFilter::class.java)
+    fun securityFilterChain(http: HttpSecurity): SecurityFilterChain {
+        http
+            .csrf { it.disable() }
+            .cors { }
+            .sessionManagement {
+                it.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+            }
+            .authorizeHttpRequests { auth ->
+                auth
+                    // Health / info for Render health checks
+                    .requestMatchers("/actuator/health", "/actuator/info").permitAll()
+                    // Auth endpoints (adjust to match your app)
+                    .requestMatchers(HttpMethod.POST, "/auth/register", "/auth/login").permitAll()
+                    // WebSocket handshake endpoint if you use STOMP
+                    .requestMatchers("/ws/**").permitAll()
+                    // Everything else needs JWT
+                    .anyRequest().authenticated()
+            }
+            .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter::class.java)
 
-    return http.build()
-}
-
+        return http.build()
+    }
 
     @Bean
     fun corsConfigurationSource(): CorsConfigurationSource =
@@ -47,6 +50,7 @@ fun filterChain(http: HttpSecurity, jwt: JwtService): SecurityFilterChain {
             c.allowedOriginPatterns = listOf("*") // dev only; tighten for prod
             c.allowedMethods = listOf("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
             c.allowedHeaders = listOf("*")
+            c.allowCredentials = true
             registerCorsConfiguration("/**", c)
         }
 }

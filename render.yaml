@@ -5,7 +5,7 @@ services:
     plan: free
     autoDeploy: true
     region: oregon
-    healthCheckPath: /actuator/health
+    # healthCheckPath: /actuator/health
     envVars:
       - key: DATABASE_URL
         fromDatabase: { name: taptaptips-db, property: connectionString }
