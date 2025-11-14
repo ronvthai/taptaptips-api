@@ -1,44 +1,26 @@
-// src/main/kotlin/com/taptaptips/server/security/JwtAuthFilter.kt
 package com.taptaptips.server.security
 
-import io.jsonwebtoken.Jwts
-import io.jsonwebtoken.security.Keys
 import jakarta.servlet.FilterChain
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
-import org.springframework.beans.factory.annotation.Value
-import org.springframework.security.authentication.AbstractAuthenticationToken
-import org.springframework.security.core.authority.SimpleGrantedAuthority
+import org.slf4j.LoggerFactory
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken
 import org.springframework.security.core.context.SecurityContextHolder
-import org.springframework.stereotype.Component
 import org.springframework.web.filter.OncePerRequestFilter
-import java.nio.charset.StandardCharsets
-import java.util.*
 
-@Component
-class JwtAuthFilter(
-    @Value("\${JWT_SECRET}") private val jwtSecret: String
-) : OncePerRequestFilter() {
-
+class JwtAuthFilter(private val jwt: JwtService) : OncePerRequestFilter() {
+    
+    private val log = LoggerFactory.getLogger(JwtAuthFilter::class.java)
+    
     override fun doFilterInternal(req: HttpServletRequest, res: HttpServletResponse, chain: FilterChain) {
-        val header = req.getHeader("Authorization")
-        if (header?.startsWith("Bearer ") == true) {
-            val token = header.substring(7)
+        val bearer = req.getHeader("Authorization")?.takeIf { it.startsWith("Bearer ") }?.removePrefix("Bearer ")
+        if (bearer != null) {
             try {
-                val key = Keys.hmacShaKeyFor(jwtSecret.toByteArray(StandardCharsets.UTF_8))
-                val claims = Jwts.parser().verifyWith(key).build().parseSignedClaims(token).payload
-                val sub = claims.subject   // expected to be your user UUID string
-                if (!sub.isNullOrBlank()) {
-                    val auth = object : AbstractAuthenticationToken(listOf(SimpleGrantedAuthority("ROLE_USER"))) {
-                        override fun getCredentials() = token
-                        override fun getPrincipal() = sub
-                        override fun getName() = sub
-                        init { isAuthenticated = true }
-                    }
-                    SecurityContextHolder.getContext().authentication = auth
-                }
-            } catch (_: Exception) {
-                // Invalid/expired token -> leave context unauthenticated
+                val uid = jwt.parse(bearer)
+                val auth = UsernamePasswordAuthenticationToken(uid.toString(), null, listOf())
+                SecurityContextHolder.getContext().authentication = auth
+            } catch (e: Exception) {
+                log.debug("JWT validation failed: ${e.message}")
             }
         }
         chain.doFilter(req, res)
