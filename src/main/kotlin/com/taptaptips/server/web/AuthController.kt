@@ -23,13 +23,21 @@ class AuthController(
     fun register(@RequestBody r: RegisterReq): ResponseEntity<Any> {
         if (userRepo.existsByEmail(r.email)) return ResponseEntity.status(409).body("email exists")
         val u = userRepo.save(AppUser(email = r.email, passwordHash = pwd.encode(r.password), displayName = r.displayName))
-        return ResponseEntity.ok(mapOf("accessToken" to jwt.issueAccess(u.id), "userId" to u.id))
+        return ResponseEntity.ok(mapOf(
+            "accessToken" to jwt.issueAccess(u.id), 
+            "userId" to u.id.toString(),
+            "username" to u.displayName
+        ))
     }
 
     @PostMapping("/login")
     fun login(@RequestBody r: LoginReq): ResponseEntity<Any> {
         val u = userRepo.findByEmail(r.email) ?: return ResponseEntity.status(401).body("bad credentials")
         if (!pwd.matches(r.password, u.passwordHash)) return ResponseEntity.status(401).body("bad credentials")
-        return ResponseEntity.ok(mapOf("accessToken" to jwt.issueAccess(u.id), "userId" to u.id))
+        return ResponseEntity.ok(mapOf(
+            "accessToken" to jwt.issueAccess(u.id), 
+            "userId" to u.id.toString(),
+            "username" to u.displayName
+        ))
     }
 }

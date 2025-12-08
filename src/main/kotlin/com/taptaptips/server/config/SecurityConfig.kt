@@ -33,6 +33,8 @@ class SecurityConfig(
                     .requestMatchers("/actuator/health", "/actuator/info").permitAll()
                     // Auth endpoints (adjust to match your app)
                     .requestMatchers(HttpMethod.POST, "/auth/register", "/auth/login").permitAll()
+                    // Avatar endpoints - allow authenticated users to view any avatar
+                    .requestMatchers(HttpMethod.GET, "/users/*/avatar").authenticated()
                     // WebSocket handshake endpoint if you use STOMP
                     .requestMatchers("/ws/**").permitAll()
                     // Everything else needs JWT
