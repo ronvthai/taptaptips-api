@@ -1,3 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
@@ -84,6 +85,15 @@
       <version>42.7.3</version>
       <scope>runtime</scope>
     </dependency>
+
+    <!-- ⭐⭐⭐ ADD FIREBASE HERE - IN THE MAIN DEPENDENCIES SECTION ⭐⭐⭐ -->
+    <dependency>
+      <groupId>com.google.firebase</groupId>
+      <artifactId>firebase-admin</artifactId>
+      <version>9.2.0</version>
+    </dependency>
+    <!-- ⭐⭐⭐ END FIREBASE DEPENDENCY ⭐⭐⭐ -->
+
   </dependencies>
 
   <build>
@@ -113,6 +123,7 @@
             <artifactId>kotlin-maven-noarg</artifactId>
             <version>${kotlin.version}</version>
           </dependency>
+          <!-- ❌ REMOVE FIREBASE FROM HERE - IT WAS IN THE WRONG PLACE! ❌ -->
         </dependencies>
         <executions>
           <execution>

@@ -37,6 +37,10 @@ class SecurityConfig(
                     .requestMatchers(HttpMethod.GET, "/users/*/avatar").authenticated()
                     // WebSocket handshake endpoint if you use STOMP
                     .requestMatchers("/ws/**").permitAll()
+                    // SSE notification endpoints - authenticated users only
+                    .requestMatchers("/notifications/**").authenticated()
+                    // ⭐ NEW: Discovery endpoints for BLE device resolution
+                    .requestMatchers("/discovery/**").authenticated()
                     // Everything else needs JWT
                     .anyRequest().authenticated()
             }

@@ -1,0 +1,93 @@
+# ============================================
+# Firebase Credentials - NEVER COMMIT THESE!
+# ============================================
+**/firebase-adminsdk*.json
+firebase-adminsdk*.json
+**/firebase-base64*.txt
+firebase-base64*.txt
+firebase-credentials*
+
+# ============================================
+# Environment Variables
+# ============================================
+.env
+.env.local
+.env.production
+.env.development
+.env.staging
+
+# ============================================
+# Build Outputs
+# ============================================
+target/
+build/
+out/
+bin/
+!**/src/main/**/target/
+!**/src/test/**/target/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+# ============================================
+# IDE Files
+# ============================================
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ============================================
+# Maven
+# ============================================
+.mvn/wrapper/maven-wrapper.jar
+.mvn/wrapper/maven-wrapper.properties
+
+# ============================================
+# Gradle
+# ============================================
+.gradle/
+gradle-app.setting
+!gradle-wrapper.jar
+.gradletasknamecache
+
+# ============================================
+# Spring Boot
+# ============================================
+spring-boot-devtools.properties
+
+# ============================================
+# Logs
+# ============================================
+*.log
+logs/
+log/
+
+# ============================================
+# Temporary Files
+# ============================================
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
+# ============================================
+# OS Files
+# ============================================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ============================================
+# Secrets and Keys
+# ============================================
+*.pem
+*.key
+*.p12
+*.jks
+secrets/
+credentials/

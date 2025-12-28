@@ -5,6 +5,7 @@ import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.repo.TipRepository
 import com.taptaptips.server.service.TipSecurityService
 import com.taptaptips.server.service.TipSecurityService.AlreadyProcessed
+import com.taptaptips.server.service.HybridNotificationService  // ⭐ CHANGED: Use hybrid service
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.security.core.context.SecurityContextHolder
 import org.springframework.transaction.annotation.Transactional
@@ -20,7 +21,8 @@ import java.util.UUID
 class TipController(
     private val tips: TipRepository,
     private val users: AppUserRepository,
-    private val security: TipSecurityService
+    private val security: TipSecurityService,
+    private val notificationService: HybridNotificationService  // ⭐ CHANGED: Use hybrid service
 ) {
     private fun authUserId(): UUID =
         UUID.fromString(SecurityContextHolder.getContext().authentication.name)
@@ -36,7 +38,7 @@ class TipController(
         val receiver = users.findById(v.receiverId).orElseThrow()
 
         return try {
-            tips.save(
+            val tip = tips.save(
                 Tip(
                     sender = sender,
                     receiver = receiver,
@@ -47,6 +49,17 @@ class TipController(
                     verified = true
                 )
             )
+            
+            // ⭐ UPDATED: Use hybrid notification service
+            // Automatically chooses SSE (if app open) or FCM (if app closed)
+            notificationService.notifyTipReceived(
+                receiverId = receiver.id!!,
+                senderId = sender.id!!,
+                senderName = sender.displayName,
+                amount = tip.amount.toInt(),
+                tipId = tip.id!!
+            )
+            
             TipResult("CONFIRMED")
         } catch (e: DataIntegrityViolationException) {
             // DB uniqueness race on (sender_id, nonce)
