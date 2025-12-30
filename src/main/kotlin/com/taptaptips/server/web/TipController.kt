@@ -5,7 +5,7 @@ import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.repo.TipRepository
 import com.taptaptips.server.service.TipSecurityService
 import com.taptaptips.server.service.TipSecurityService.AlreadyProcessed
-import com.taptaptips.server.service.HybridNotificationService  // ⭐ CHANGED: Use hybrid service
+import com.taptaptips.server.service.NotificationService 
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.security.core.context.SecurityContextHolder
 import org.springframework.transaction.annotation.Transactional
@@ -22,7 +22,7 @@ class TipController(
     private val tips: TipRepository,
     private val users: AppUserRepository,
     private val security: TipSecurityService,
-    private val notificationService: HybridNotificationService  // ⭐ CHANGED: Use hybrid service
+    private val notificationService: NotificationService
 ) {
     private fun authUserId(): UUID =
         UUID.fromString(SecurityContextHolder.getContext().authentication.name)

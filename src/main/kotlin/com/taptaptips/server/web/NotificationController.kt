@@ -1,48 +1,90 @@
 package com.taptaptips.server.web
 
-import com.taptaptips.server.service.SseNotificationService
-import org.springframework.http.MediaType
+import com.taptaptips.server.repo.FcmTokenRepository
+import com.taptaptips.server.service.NotificationService
 import org.springframework.security.core.context.SecurityContextHolder
-import org.springframework.web.bind.annotation.GetMapping
-import org.springframework.web.bind.annotation.RequestMapping
-import org.springframework.web.bind.annotation.RestController
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter
+import org.springframework.web.bind.annotation.*
 import java.util.UUID
 
+/**
+ * Notification endpoints for FCM-based push notifications.
+ * 
+ * Endpoints:
+ * - GET /notifications/status - Check user's registered FCM devices
+ * - POST /notifications/test - Send test notification (useful for debugging)
+ */
 @RestController
 @RequestMapping("/notifications")
 class NotificationController(
-    private val sseNotificationService: SseNotificationService
+    private val fcmTokenRepository: FcmTokenRepository,
+    private val notificationService: NotificationService
 ) {
     
     /**
-     * SSE endpoint - client connects here to receive real-time notifications.
-     * Connection stays open and server pushes events as they happen.
+     * Get user's notification status.
+     * Shows all registered FCM devices and their details.
      * 
-     * Example usage from Android:
-     * GET /notifications/stream
-     * Headers: Authorization: Bearer <token>
-     *          Accept: text/event-stream
+     * Response:
+     * {
+     *   "userId": "...",
+     *   "fcmDevices": 2,
+     *   "devices": [
+     *     {
+     *       "platform": "android",
+     *       "deviceInfo": "Pixel 6 (Android 14)",
+     *       "lastUsed": "2025-01-15T10:30:00Z"
+     *     }
+     *   ]
+     * }
      */
-    @GetMapping("/stream", produces = [MediaType.TEXT_EVENT_STREAM_VALUE])
-    fun streamNotifications(): SseEmitter {
+    @GetMapping("/status")
+    fun getStatus(): Map<String, Any> {
         val userId = UUID.fromString(
             SecurityContextHolder.getContext().authentication.name
         )
         
-        return sseNotificationService.registerConnection(userId)
+        val tokens = fcmTokenRepository.findByUser_IdAndIsActiveTrue(userId)
+        
+        return mapOf(
+            "userId" to userId.toString(),
+            "fcmDevices" to tokens.size,
+            "devices" to tokens.map { 
+                mapOf(
+                    "platform" to it.platform,
+                    "deviceInfo" to it.deviceInfo,
+                    "lastUsed" to it.lastUsed?.toString(),
+                    "createdAt" to it.createdAt.toString()
+                )
+            },
+            "timestamp" to System.currentTimeMillis()
+        )
     }
     
     /**
-     * Health check endpoint to see connection stats.
-     * Useful for monitoring and debugging.
+     * Send a test notification to verify FCM is working.
+     * Useful for debugging and user onboarding.
+     * 
+     * Request body:
+     * {
+     *   "message": "Test notification message"
+     * }
      */
-    @GetMapping("/status")
-    fun getStatus(): Map<String, Any> {
+    @PostMapping("/test")
+    fun sendTestNotification(@RequestBody request: Map<String, String>): Map<String, Any> {
+        val userId = UUID.fromString(
+            SecurityContextHolder.getContext().authentication.name
+        )
+        
+        val message = request["message"] ?: "This is a test notification"
+        val success = notificationService.sendTestNotification(userId, message)
+        
         return mapOf(
-            "activeConnections" to sseNotificationService.getActiveConnectionCount(),
-            "activeUsers" to sseNotificationService.getActiveUserCount(),
-            "timestamp" to System.currentTimeMillis()
+            "success" to success,
+            "message" to if (success) {
+                "Test notification sent successfully"
+            } else {
+                "Failed to send test notification (no active FCM tokens)"
+            }
         )
     }
 }
