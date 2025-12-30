@@ -10,7 +10,8 @@ data class CreateTipRequest(
     val nonce: String,
     val timestamp: Long,
     val signature: String,
-    val deviceId: String? // must be provided by client
+    val deviceId: String?, // must be provided by client
+    val timezone: String   // ⭐ NEW: User's timezone (e.g., "America/Los_Angeles")
 )
 
 data class TipResult(val status: String) // "CONFIRMED" | "DUPLICATE"

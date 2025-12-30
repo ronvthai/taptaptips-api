@@ -4,7 +4,7 @@ import jakarta.persistence.*
 import java.math.BigDecimal
 import java.time.Instant
 import java.util.UUID
-
+import java.time.LocalDate
 @Entity
 @Table(name = "tip")
 open class Tip(
@@ -21,6 +21,12 @@ open class Tip(
 
     @Column(name = "created_at", nullable = false)
     val createdAt: Instant = Instant.now(),
+
+    @Column(name = "created_at_local", nullable = false)  // ⭐ NEW
+    val createdAtLocal: LocalDate = LocalDate.now(),      // ⭐ NEW
+
+    @Column(name = "timezone", nullable = false, length = 50)  // ⭐ NEW
+    val timezone: String = "",                                  // ⭐ NEW
 
     val nonce: String = "",
 
