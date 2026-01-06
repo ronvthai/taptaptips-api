@@ -7,6 +7,8 @@ import org.springframework.http.HttpMethod
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity
 import org.springframework.security.config.http.SessionCreationPolicy
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder
+import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.security.web.SecurityFilterChain
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter
 import org.springframework.web.cors.CorsConfiguration
@@ -31,16 +33,34 @@ class SecurityConfig(
                 auth
                     // Health / info for Render health checks
                     .requestMatchers("/actuator/health", "/actuator/info").permitAll()
-                    // Auth endpoints (adjust to match your app)
+                    
+                    // Auth endpoints
                     .requestMatchers(HttpMethod.POST, "/auth/register", "/auth/login").permitAll()
+                    
+                    // Password reset endpoints (must be public)
+                    .requestMatchers(HttpMethod.POST, "/auth/password/forgot").permitAll()
+                    .requestMatchers(HttpMethod.POST, "/auth/password/validate-token").permitAll()
+                    .requestMatchers(HttpMethod.POST, "/auth/password/reset").permitAll()
+                    
+                    // Stripe onboarding callbacks (Stripe calls these after user completes form)
+                    .requestMatchers(HttpMethod.GET, "/stripe/onboarding/complete").permitAll()
+                    .requestMatchers(HttpMethod.GET, "/stripe/onboarding/refresh").permitAll()
+                    
+                    // Stripe receiver endpoints - authenticated users only
+                    .requestMatchers("/stripe/receiver/**").authenticated()
+                    
                     // Avatar endpoints - allow authenticated users to view any avatar
                     .requestMatchers(HttpMethod.GET, "/users/*/avatar").authenticated()
+                    
                     // WebSocket handshake endpoint if you use STOMP
                     .requestMatchers("/ws/**").permitAll()
+                    
                     // SSE notification endpoints - authenticated users only
                     .requestMatchers("/notifications/**").authenticated()
-                    // ⭐ NEW: Discovery endpoints for BLE device resolution
+                    
+                    // Discovery endpoints for BLE device resolution
                     .requestMatchers("/discovery/**").authenticated()
+                    
                     // Everything else needs JWT
                     .anyRequest().authenticated()
             }
@@ -59,4 +79,12 @@ class SecurityConfig(
             c.allowCredentials = true
             registerCorsConfiguration("/**", c)
         }
+    
+    /**
+     * Password encoder bean - used by AuthController and PasswordResetService
+     */
+    @Bean
+    fun passwordEncoder(): PasswordEncoder {
+        return BCryptPasswordEncoder()
+    }
 }
