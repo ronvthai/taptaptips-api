@@ -350,7 +350,17 @@ class UserController(
             displayName = body.displayName ?: u.displayName,
             createdAt   = u.createdAt,
             updatedAt   = java.time.Instant.now(),
-            profilePicture = u.profilePicture
+            profilePicture = u.profilePicture,
+            // Preserve Stripe receiver fields
+            wantsToReceiveTips = u.wantsToReceiveTips,
+            stripeAccountId = u.stripeAccountId,
+            stripeOnboarded = u.stripeOnboarded,
+            stripeLastChecked = u.stripeLastChecked,
+            bankLast4 = u.bankLast4,
+            bankName = u.bankName,
+            // Preserve Stripe sender fields  
+            stripeCustomerId = u.stripeCustomerId,
+            defaultPaymentMethodId = u.defaultPaymentMethodId
         )
 
         users.save(newEntity)
