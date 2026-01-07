@@ -34,6 +34,9 @@ class SecurityConfig(
                     // Health / info for Render health checks
                     .requestMatchers("/actuator/health", "/actuator/info").permitAll()
                     
+                    // Android App Links verification
+                    .requestMatchers("/.well-known/**").permitAll()
+                    
                     // Auth endpoints
                     .requestMatchers(HttpMethod.POST, "/auth/register", "/auth/login").permitAll()
                     
