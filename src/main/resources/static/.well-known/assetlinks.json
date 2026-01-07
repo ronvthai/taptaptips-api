@@ -1,0 +1,10 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "com.app.taptaptips",
+    "sha256_cert_fingerprints": [
+      "7E:0F:52:2D:76:1E:B2:93:97:2E:F7:18:00:3E:8A:D2:B5:06:E3:70:19:4D:42:0D:3B:95:20:28:25:4F:39:7F"
+    ]
+  }
+}]
