@@ -10,16 +10,34 @@ import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.math.BigDecimal
+import java.math.RoundingMode
 import java.time.Instant
 import java.util.*
 
 @Service
 class StripePaymentService(
     private val userRepository: AppUserRepository,
-    @Value("\${app.base.url:http://192.168.1.153}") 
+
+    @Value("\${app.base.url:http://192.168.1.153}")
     private val baseUrl: String,
-    @Value("\${stripe.platform.fee.percent:0}") 
-    private val platformFeePercent: Int
+
+    // Break-even fee model (defaults to Stripe US online card 2.9% + 30¢)
+    @Value("\${stripe.processing.fee.percent:2.9}")
+    private val processingFeePercent: BigDecimal,
+
+    @Value("\${stripe.processing.fee.fixed.cents:30}")
+    private val processingFeeFixedCents: Long,
+
+    // Optional extra platform margin (set to 0 for pure break-even)
+    @Value("\${stripe.platform.fee.fixed.cents:0}")
+    private val platformFeeFixedCents: Long,
+
+    @Value("\${stripe.platform.fee.percent:0.0}")
+    private val platformFeePercent: BigDecimal,
+
+    // Stripe minimum charge guard (USD typically $0.50)
+    @Value("\${stripe.minimum.charge.cents:50}")
+    private val minimumChargeCents: Long
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
     
@@ -345,6 +363,37 @@ class StripePaymentService(
             throw RuntimeException("Failed to detach payment method: ${e.message}", e)
         }
     }
+    private fun toCents(amount: BigDecimal): Long {
+        // Force 2dp then convert to cents exactly
+        val normalized = amount.setScale(2, RoundingMode.HALF_UP)
+        return normalized.movePointRight(2).longValueExact()
+    }
+    /**
+     * Application fee is how we make the receiver "pay":
+     * Receiver receives (amount - applicationFee).
+     *
+     * For destination charges, Stripe deducts processing fees from the platform.
+     * By setting application_fee_amount ~= processing fee, platform breaks even.
+     */
+    private fun computeApplicationFeeCents(amountCents: Long): Long {
+        // percent portion in cents: ceil(amountCents * (percent/100))
+        val percentFeeCents = BigDecimal(amountCents)
+            .multiply(processingFeePercent)
+            .divide(BigDecimal("100"), 10, RoundingMode.HALF_UP)
+            .setScale(0, RoundingMode.CEILING)
+            .longValueExact()
+
+        val processingFeeCents = percentFeeCents + processingFeeFixedCents
+
+        // Optional platform margin (usually 0 for break-even)
+        val platformPercentCents = BigDecimal(amountCents)
+            .multiply(platformFeePercent)
+            .divide(BigDecimal("100"), 10, RoundingMode.HALF_UP)
+            .setScale(0, RoundingMode.CEILING)
+            .longValueExact()
+
+        return processingFeeCents + platformPercentCents + platformFeeFixedCents
+    }
     
     /**
      * Create PaymentIntent using saved payment method
@@ -359,30 +408,46 @@ class StripePaymentService(
         receiverId: UUID,
         tipNonce: String,
         paymentMethodId: String,
-        senderCustomerId: String  // ADDED: Customer ID is required
+        senderCustomerId: String
     ): PaymentIntent {
         try {
-            logger.info("💳 Creating payment intent with saved method")
-            logger.info("   - Amount: $$amount")
-            logger.info("   - Sender: $senderId")
-            logger.info("   - Receiver: $receiverId")
-            logger.info("   - Payment Method: $paymentMethodId")
-            logger.info("   - Customer: $senderCustomerId")
-            
-            val amountInCents = (amount.multiply(BigDecimal(100))).toLong()
-            val applicationFee = (amountInCents * platformFeePercent) / 100
-            
-            logger.info("   - Amount in cents: $amountInCents")
-            logger.info("   - Platform fee: $applicationFee cents ($platformFeePercent%)")
-            
+            val amountInCents = toCents(amount)
+
+            if (amountInCents < minimumChargeCents) {
+                throw IllegalArgumentException("Tip is below minimum charge: ${minimumChargeCents} cents")
+            }
+
+            val applicationFeeCents = computeApplicationFeeCents(amountInCents)
+
+            // Prevent pathological cases where fee >= amount
+            if (applicationFeeCents >= amountInCents) {
+                throw IllegalArgumentException(
+                    "Computed fee ($applicationFeeCents) must be less than amount ($amountInCents)."
+                )
+            }
+
+            val receiverNetCents = amountInCents - applicationFeeCents
+
+            logger.info("💳 Creating destination PaymentIntent (receiver pays fees via net transfer)")
+            logger.info("   - Gross (charged to sender): $amountInCents cents")
+            logger.info("   - App fee (kept by platform to cover Stripe fee): $applicationFeeCents cents")
+            logger.info("   - Receiver net transfer: $receiverNetCents cents")
+            logger.info("   - Sender: $senderId | Receiver: $receiverId")
+            logger.info("   - PM: $paymentMethodId | Customer: $senderCustomerId")
+            logger.info("   - Destination acct: $receiverStripeAccountId")
+
             val params = PaymentIntentCreateParams.builder()
-                .setAmount(amountInCents)
+                .setAmount(amountInCents)                // Sender pays EXACTLY the tip amount
                 .setCurrency("usd")
-                .setCustomer(senderCustomerId)  // FIXED: Must include customer when using saved payment method
-                .setApplicationFeeAmount(applicationFee)
-                .setPaymentMethod(paymentMethodId)  // Use saved card
-                .setConfirm(true)  // Auto-confirm (no extra step needed!)
-                .setOffSession(true)  // Allow charging when user is offline
+                .setCustomer(senderCustomerId)
+                .setPaymentMethod(paymentMethodId)
+                .setConfirm(true)
+                .setOffSession(true)
+
+                // Key line: makes receiver get net (amount - app_fee)
+                .setApplicationFeeAmount(applicationFeeCents)
+
+                // Destination charge: routes funds to receiver
                 .setTransferData(
                     PaymentIntentCreateParams.TransferData.builder()
                         .setDestination(receiverStripeAccountId)
@@ -391,20 +456,18 @@ class StripePaymentService(
                 .putMetadata("sender_id", senderId.toString())
                 .putMetadata("receiver_id", receiverId.toString())
                 .putMetadata("tip_nonce", tipNonce)
+                .putMetadata("gross_cents", amountInCents.toString())
+                .putMetadata("app_fee_cents", applicationFeeCents.toString())
+                .putMetadata("receiver_net_cents", receiverNetCents.toString())
                 .build()
-            
+
             val paymentIntent = PaymentIntent.create(params)
-            
-            logger.info("✅ Payment intent created: ${paymentIntent.id}")
-            logger.info("   - Status: ${paymentIntent.status}")
-            logger.info("   - Amount charged: ${paymentIntent.amount} cents")
-            
+
+            logger.info("✅ PaymentIntent: ${paymentIntent.id} status=${paymentIntent.status} amount=${paymentIntent.amount}")
             return paymentIntent
-            
+
         } catch (e: StripeException) {
-            logger.error("❌ Failed to create payment intent", e)
-            logger.error("   - Error type: ${e.javaClass.simpleName}")
-            logger.error("   - Error message: ${e.message}")
+            logger.error("❌ Failed to create payment intent: ${e.message}", e)
             throw RuntimeException("Failed to create payment intent: ${e.message}", e)
         }
     }
