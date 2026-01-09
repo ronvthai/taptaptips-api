@@ -24,13 +24,19 @@ class SecurityConfig(
     @Bean
     fun securityFilterChain(http: HttpSecurity): SecurityFilterChain {
         http
-            .csrf { it.disable() }
+            // Disable CSRF completely (or ignore for webhooks)
+            .csrf { csrf ->
+                csrf.ignoringRequestMatchers("/webhooks/**")
+            }
             .cors { }
             .sessionManagement {
                 it.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
             }
             .authorizeHttpRequests { auth ->
                 auth
+                    // ============ NEW: Webhook endpoints (MUST BE FIRST) ============
+                    .requestMatchers("/webhooks/**").permitAll()
+                    
                     // Health / info for Render health checks
                     .requestMatchers("/actuator/health", "/actuator/info").permitAll()
                     

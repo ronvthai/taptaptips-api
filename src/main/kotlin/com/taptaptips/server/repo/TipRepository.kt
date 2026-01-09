@@ -5,6 +5,8 @@ import org.springframework.data.jpa.repository.JpaRepository
 import java.time.Instant
 import java.time.LocalDate  // ⭐ NEW
 import java.util.*
+import org.springframework.data.jpa.repository.Query
+import org.springframework.data.repository.query.Param
 
 interface TipRepository : JpaRepository<Tip, UUID> {
     // Use nested path for the relation:
@@ -41,4 +43,13 @@ interface TipRepository : JpaRepository<Tip, UUID> {
         receiverId: UUID,
         date: LocalDate
     ): List<Tip>
+
+    // Add these methods to your existing TipRepository interface
+    fun findByPaymentIntentId(paymentIntentId: String): Tip?
+    fun findByChargeId(chargeId: String): Tip?
+    fun findByNonce(nonce: String): Tip?
+    fun countBySender_Id(senderId: UUID): Long
+
+    @Query("SELECT COUNT(t) FROM Tip t WHERE t.sender.id = :senderId AND t.status = 'DISPUTED'")
+    fun countDisputesBySender(@Param("senderId") senderId: UUID): Long
 }

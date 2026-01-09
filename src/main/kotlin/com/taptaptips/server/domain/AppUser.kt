@@ -57,5 +57,15 @@ open class AppUser(
     var stripeCustomerId: String? = null,
     
     @Column(name = "default_payment_method_id")
-    var defaultPaymentMethodId: String? = null  // ⭐ ADD THIS LINE
+    var defaultPaymentMethodId: String? = null,  // ⭐ ADD THIS LINE
+
+    // Add these to your existing AppUser entity
+    @Column(name = "suspended")
+    var suspended: Boolean = false,
+
+    @Column(name = "suspension_reason")
+    var suspensionReason: String? = null,
+
+    @Column(name = "suspended_at")
+    var suspendedAt: Instant? = null
 )

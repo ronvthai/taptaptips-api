@@ -7,4 +7,6 @@ import java.util.*
 interface AppUserRepository : JpaRepository<AppUser, UUID> {
     fun existsByEmail(email: String): Boolean
     fun findByEmail(email: String): AppUser?
+    // Add to your existing AppUserRepository interface
+    fun findByStripeAccountId(stripeAccountId: String): AppUser?
 }
