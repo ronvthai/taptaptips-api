@@ -24,17 +24,14 @@ class SecurityConfig(
     @Bean
     fun securityFilterChain(http: HttpSecurity): SecurityFilterChain {
         http
-            // Disable CSRF completely (or ignore for webhooks)
-            .csrf { csrf ->
-                csrf.ignoringRequestMatchers("/webhooks/**")
-            }
+            .csrf { it.disable() }  // ← FULLY DISABLE CSRF
             .cors { }
             .sessionManagement {
                 it.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
             }
             .authorizeHttpRequests { auth ->
                 auth
-                    // ============ NEW: Webhook endpoints (MUST BE FIRST) ============
+                    // ============ WEBHOOKS FIRST (MOST IMPORTANT) ============
                     .requestMatchers("/webhooks/**").permitAll()
                     
                     // Health / info for Render health checks
@@ -51,23 +48,23 @@ class SecurityConfig(
                     .requestMatchers(HttpMethod.POST, "/auth/password/validate-token").permitAll()
                     .requestMatchers(HttpMethod.POST, "/auth/password/reset").permitAll()
                     
-                    // Stripe onboarding callbacks (Stripe calls these after user completes form)
+                    // Stripe onboarding callbacks
                     .requestMatchers(HttpMethod.GET, "/stripe/onboarding/complete").permitAll()
                     .requestMatchers(HttpMethod.GET, "/stripe/onboarding/refresh").permitAll()
                     
                     // Stripe receiver endpoints - authenticated users only
                     .requestMatchers("/stripe/receiver/**").authenticated()
                     
-                    // Avatar endpoints - allow authenticated users to view any avatar
+                    // Avatar endpoints
                     .requestMatchers(HttpMethod.GET, "/users/*/avatar").authenticated()
                     
-                    // WebSocket handshake endpoint if you use STOMP
+                    // WebSocket
                     .requestMatchers("/ws/**").permitAll()
                     
-                    // SSE notification endpoints - authenticated users only
+                    // SSE notifications
                     .requestMatchers("/notifications/**").authenticated()
                     
-                    // Discovery endpoints for BLE device resolution
+                    // Discovery endpoints
                     .requestMatchers("/discovery/**").authenticated()
                     
                     // Everything else needs JWT
@@ -82,16 +79,13 @@ class SecurityConfig(
     fun corsConfigurationSource(): CorsConfigurationSource =
         UrlBasedCorsConfigurationSource().apply {
             val c = CorsConfiguration()
-            c.allowedOriginPatterns = listOf("*") // dev only; tighten for prod
+            c.allowedOriginPatterns = listOf("*")
             c.allowedMethods = listOf("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
             c.allowedHeaders = listOf("*")
             c.allowCredentials = true
             registerCorsConfiguration("/**", c)
         }
     
-    /**
-     * Password encoder bean - used by AuthController and PasswordResetService
-     */
     @Bean
     fun passwordEncoder(): PasswordEncoder {
         return BCryptPasswordEncoder()
