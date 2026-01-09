@@ -66,31 +66,34 @@ class StripeWebhookController(
     }
     
     private fun handleDisputeCreated(event: Event) {
-        val dispute = event.dataObjectDeserializer.`object`.get() as Dispute
-        val paymentIntentId = dispute.paymentIntent
+    val dispute = event.dataObjectDeserializer.`object`.get() as Dispute
+    val paymentIntentId = dispute.paymentIntent
+    
+    logger.error("🚨 DISPUTE CREATED")
+    logger.error("   Dispute ID: ${dispute.id}")
+    logger.error("   Amount: ${dispute.amount} cents")
+    logger.error("   Reason: ${dispute.reason}")
+    logger.error("   Payment Intent: $paymentIntentId")
+    
+    val tip = tipRepository.findByPaymentIntentId(paymentIntentId)
+    
+    if (tip != null) {
+        tip.status = TipStatus.DISPUTED
+        tip.disputeId = dispute.id
+        tip.disputeReason = dispute.reason
+        tip.updatedAt = Instant.now()
+        tipRepository.save(tip)
         
-        logger.error("🚨 DISPUTE CREATED")
-        logger.error("   Dispute ID: ${dispute.id}")
-        logger.error("   Amount: ${dispute.amount} cents")
-        logger.error("   Reason: ${dispute.reason}")
-        logger.error("   Payment Intent: $paymentIntentId")
+        logger.info("✅ Marked tip ${tip.id} as DISPUTED")
         
-        val tip = tipRepository.findByPaymentIntentId(paymentIntentId)
-        
-        if (tip != null) {
-            tip.status = TipStatus.DISPUTED
-            tip.disputeId = dispute.id
-            tip.disputeReason = dispute.reason
-            tip.updatedAt = Instant.now()
-            tipRepository.save(tip)
-            
-            logger.info("✅ Marked tip ${tip.id} as DISPUTED")
-            
-            checkSenderForFraud(tip.sender?.id!!)
-        } else {
-            logger.warn("⚠️ Could not find tip for payment intent: $paymentIntentId")
+        // Only check fraud if sender exists
+        tip.sender?.id?.let { senderId ->
+            checkSenderForFraud(senderId)
         }
+    } else {
+        logger.warn("⚠️ Could not find tip for payment intent: $paymentIntentId (likely a test event)")
     }
+}
     
     private fun handleDisputeUpdated(event: Event) {
         val dispute = event.dataObjectDeserializer.`object`.get() as Dispute
