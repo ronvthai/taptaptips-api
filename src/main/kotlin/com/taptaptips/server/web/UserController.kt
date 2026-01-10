@@ -22,7 +22,11 @@ class UserController(
     private val users: AppUserRepository,
     private val devices: DeviceRepository
 ) {
-
+    data class UserStatusResponse(
+        val suspended: Boolean,
+        val suspensionReason: String?,
+        val suspendedAt: String?  // ISO datetime string
+    )
     // ============================================
     // BLE Endpoint Mapping (In-Memory Cache)
     // ============================================
@@ -261,7 +265,24 @@ class UserController(
             .cacheControl(CacheControl.maxAge(Duration.ofMinutes(30)).cachePublic())
             .body(response)
     }
-    
+    /**
+     * Get current user's suspension status
+     * Used by Android app to check if user is suspended before allowing tip sending
+     */
+    @GetMapping("/me/status")
+    fun getMyStatus(@AuthenticationPrincipal auth: com.taptaptips.server.security.JwtAuth): UserStatusResponse {
+        val userId = UUID.fromString(auth.userId)
+        val user = users.findById(userId).orElseThrow {
+            ResponseStatusException(HttpStatus.NOT_FOUND, "User not found")
+        }
+        
+        return UserStatusResponse(
+            suspended = user.suspended,
+            suspensionReason = user.suspensionReason,
+            suspendedAt = user.suspendedAt?.toString()
+        )
+    }
+
     /**
      * Batch endpoint: Get public keys for multiple users at once
      * More efficient when verifying multiple connections
