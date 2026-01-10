@@ -66,34 +66,33 @@ class StripeWebhookController(
     }
     
     private fun handleDisputeCreated(event: Event) {
-    val dispute = event.dataObjectDeserializer.`object`.get() as Dispute
-    val paymentIntentId = dispute.paymentIntent
-    
-    logger.error("🚨 DISPUTE CREATED")
-    logger.error("   Dispute ID: ${dispute.id}")
-    logger.error("   Amount: ${dispute.amount} cents")
-    logger.error("   Reason: ${dispute.reason}")
-    logger.error("   Payment Intent: $paymentIntentId")
-    
-    val tip = tipRepository.findByPaymentIntentId(paymentIntentId)
-    
-    if (tip != null) {
-        tip.status = TipStatus.DISPUTED
-        tip.disputeId = dispute.id
-        tip.disputeReason = dispute.reason
-        tip.updatedAt = Instant.now()
-        tipRepository.save(tip)
+        val dispute = event.dataObjectDeserializer.`object`.get() as Dispute
+        val paymentIntentId = dispute.paymentIntent
         
-        logger.info("✅ Marked tip ${tip.id} as DISPUTED")
+        logger.error("🚨 DISPUTE CREATED")
+        logger.error("   Dispute ID: ${dispute.id}")
+        logger.error("   Amount: ${dispute.amount} cents")
+        logger.error("   Reason: ${dispute.reason}")
+        logger.error("   Payment Intent: $paymentIntentId")
         
-        // Only check fraud if sender exists
-        tip.sender?.id?.let { senderId ->
-            checkSenderForFraud(senderId)
+        val tip = tipRepository.findByPaymentIntentId(paymentIntentId)
+        
+        if (tip != null) {
+            tip.status = TipStatus.DISPUTED
+            tip.disputeId = dispute.id
+            tip.disputeReason = dispute.reason
+            tip.updatedAt = Instant.now()
+            tipRepository.save(tip)
+            
+            logger.info("✅ Marked tip ${tip.id} as DISPUTED")
+            
+            tip.sender?.id?.let { senderId ->
+                checkSenderForFraud(senderId)
+            }
+        } else {
+            logger.warn("⚠️ Could not find tip for payment intent: $paymentIntentId (likely a test event)")
         }
-    } else {
-        logger.warn("⚠️ Could not find tip for payment intent: $paymentIntentId (likely a test event)")
     }
-}
     
     private fun handleDisputeUpdated(event: Event) {
         val dispute = event.dataObjectDeserializer.`object`.get() as Dispute
@@ -104,6 +103,9 @@ class StripeWebhookController(
             tip.disputeReason = dispute.reason
             tip.updatedAt = Instant.now()
             tipRepository.save(tip)
+            logger.info("✅ Updated dispute for tip ${tip.id}")
+        } else {
+            logger.warn("⚠️ Could not find tip for payment intent: ${dispute.paymentIntent}")
         }
     }
     
@@ -116,6 +118,9 @@ class StripeWebhookController(
             tip.status = if (dispute.status == "won") TipStatus.SUCCEEDED else TipStatus.REFUNDED
             tip.updatedAt = Instant.now()
             tipRepository.save(tip)
+            logger.info("✅ Closed dispute for tip ${tip.id}, status: ${tip.status}")
+        } else {
+            logger.warn("⚠️ Could not find tip for payment intent: ${dispute.paymentIntent}")
         }
     }
     
@@ -129,6 +134,9 @@ class StripeWebhookController(
             tip.chargeId = charge.id
             tip.updatedAt = Instant.now()
             tipRepository.save(tip)
+            logger.info("✅ Marked tip ${tip.id} as SUCCEEDED")
+        } else {
+            logger.warn("⚠️ Could not find tip for payment intent: ${charge.paymentIntent} (likely a test event)")
         }
     }
     
@@ -141,6 +149,9 @@ class StripeWebhookController(
             tip.status = TipStatus.REFUNDED
             tip.updatedAt = Instant.now()
             tipRepository.save(tip)
+            logger.info("✅ Marked tip ${tip.id} as REFUNDED")
+        } else {
+            logger.warn("⚠️ Could not find tip for payment intent: ${charge.paymentIntent}")
         }
     }
     
@@ -157,7 +168,12 @@ class StripeWebhookController(
                 tip.failureReason = paymentIntent.lastPaymentError?.message
                 tip.updatedAt = Instant.now()
                 tipRepository.save(tip)
+                logger.info("✅ Marked tip ${tip.id} as FAILED")
+            } else {
+                logger.warn("⚠️ Could not find tip for nonce: $tipNonce (likely a test event)")
             }
+        } else {
+            logger.warn("⚠️ Payment failed but no tip_nonce in metadata")
         }
     }
     
@@ -173,22 +189,27 @@ class StripeWebhookController(
                 tip.failureReason = "Payment canceled"
                 tip.updatedAt = Instant.now()
                 tipRepository.save(tip)
+                logger.info("✅ Marked tip ${tip.id} as FAILED (canceled)")
+            } else {
+                logger.warn("⚠️ Could not find tip for nonce: $tipNonce (likely a test event)")
             }
+        } else {
+            logger.warn("⚠️ Payment canceled but no tip_nonce in metadata")
         }
     }
     
     private fun handleFraudWarning(event: Event) {
-    // EarlyFraudWarning class doesn't exist in this Stripe SDK version
-    // Just log it for manual review
-    logger.error("🚨🚨🚨 FRAUD WARNING RECEIVED 🚨🚨🚨")
-    logger.error("   Event ID: ${event.id}")
-    logger.error("   Event Type: ${event.type}")
-    logger.error("   ⚠️ Manual review required - check Stripe Dashboard")
-    
-    // Note: Fraud warnings are extremely rare
-    // When they occur, check Stripe Dashboard → Radar → Reviews
-    // and manually suspend the user if needed
-}
+        // EarlyFraudWarning class doesn't exist in this Stripe SDK version
+        // Just log it for manual review
+        logger.error("🚨🚨🚨 FRAUD WARNING RECEIVED 🚨🚨🚨")
+        logger.error("   Event ID: ${event.id}")
+        logger.error("   Event Type: ${event.type}")
+        logger.error("   ⚠️ Manual review required - check Stripe Dashboard")
+        
+        // Note: Fraud warnings are extremely rare
+        // When they occur, check Stripe Dashboard → Radar → Reviews
+        // and manually suspend the user if needed
+    }
     
     private fun handleReviewOpened(event: Event) {
         val review = event.dataObjectDeserializer.`object`.get() as Review
@@ -200,6 +221,9 @@ class StripeWebhookController(
             tip.fraudType = "stripe_review_${review.reason}"
             tip.updatedAt = Instant.now()
             tipRepository.save(tip)
+            logger.info("✅ Flagged tip ${tip.id} for review")
+        } else {
+            logger.warn("⚠️ Could not find tip for charge: ${review.charge} (likely a test event)")
         }
     }
     
@@ -219,7 +243,10 @@ class StripeWebhookController(
     private fun suspendUserForFraud(userId: UUID, reason: String) {
         val user = userRepository.findById(userId).orElse(null) ?: return
         
-        if (user.suspended) return
+        if (user.suspended) {
+            logger.info("⚠️ User $userId already suspended")
+            return
+        }
         
         user.suspended = true
         user.suspensionReason = reason
