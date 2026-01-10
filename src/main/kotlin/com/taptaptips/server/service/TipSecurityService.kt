@@ -51,6 +51,25 @@ class TipSecurityService(
         }
         log.debug("✓ Sender matches auth principal")
 
+        // ========== 🆕 NEW: Check if sender is suspended ==========
+        // 1.5) Fetch sender and check suspension status
+        val sender = users.findById(req.senderId).orElseThrow {
+            log.warn("❌ Sender not found: ${req.senderId}")
+            ResponseStatusException(HttpStatus.BAD_REQUEST, "Sender not found")
+        }
+        
+        if (sender.suspended) {
+            log.warn("🚫 SUSPENDED USER BLOCKED: ${req.senderId}")
+            log.warn("   Suspension reason: ${sender.suspensionReason}")
+            log.warn("   Suspended at: ${sender.suspendedAt}")
+            throw ResponseStatusException(
+                HttpStatus.FORBIDDEN, 
+                "Account suspended: ${sender.suspensionReason ?: "Multiple disputes detected"}"
+            )
+        }
+        log.debug("✓ Sender is not suspended")
+        // ========== END NEW CHECK ==========
+
         // 2) Receiver exists and isn't the sender
         val receiver = users.findById(req.receiverId).orElseThrow {
             log.warn("❌ Receiver not found: ${req.receiverId}")
