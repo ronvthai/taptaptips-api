@@ -270,7 +270,8 @@ class UserController(
      * Used by Android app to check if user is suspended before allowing tip sending
      */
     @GetMapping("/me/status")
-    fun getMyStatus(@AuthenticationPrincipal userId: UUID): UserStatusResponse {
+    fun getMyStatus(@AuthenticationPrincipal userIdStr: String): UserStatusResponse {
+        val userId = UUID.fromString(userIdStr)
         val user = users.findById(userId).orElseThrow {
             ResponseStatusException(HttpStatus.NOT_FOUND, "User not found")
         }
