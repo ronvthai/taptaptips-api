@@ -14,6 +14,5 @@ class StripeConfig(
     @PostConstruct
     fun init() {
         Stripe.apiKey = stripeSecretKey
-        println("✅ Stripe initialized with API key: ${stripeSecretKey.take(20)}...")
     }
 }

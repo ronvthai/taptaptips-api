@@ -428,14 +428,6 @@ class StripePaymentService(
 
             val receiverNetCents = amountInCents - applicationFeeCents
 
-            logger.info("💳 Creating destination PaymentIntent (receiver pays fees via net transfer)")
-            logger.info("   - Gross (charged to sender): $amountInCents cents")
-            logger.info("   - App fee (kept by platform to cover Stripe fee): $applicationFeeCents cents")
-            logger.info("   - Receiver net transfer: $receiverNetCents cents")
-            logger.info("   - Sender: $senderId | Receiver: $receiverId")
-            logger.info("   - PM: $paymentMethodId | Customer: $senderCustomerId")
-            logger.info("   - Destination acct: $receiverStripeAccountId")
-
             val params = PaymentIntentCreateParams.builder()
                 .setAmount(amountInCents)                // Sender pays EXACTLY the tip amount
                 .setCurrency("usd")
