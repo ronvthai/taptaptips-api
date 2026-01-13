@@ -1,6 +1,7 @@
 package com.taptaptips.server.config
 
 import com.taptaptips.server.security.JwtAuthFilter
+import com.taptaptips.server.security.RateLimitFilter
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.http.HttpMethod
@@ -15,14 +16,15 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 @Configuration
 @EnableWebSecurity
 class SecurityConfig(
-    private val jwtAuthFilter: JwtAuthFilter
+    private val jwtAuthFilter: JwtAuthFilter,
+    private val rateLimitFilter: RateLimitFilter
 ) {
 
     @Bean
     fun securityFilterChain(http: HttpSecurity): SecurityFilterChain {
         http
             .csrf { it.disable() }
-            .cors { it.disable() }  // ✅ Android-only, no CORS needed
+            .cors { it.disable() }
             .sessionManagement {
                 it.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
             }
@@ -40,6 +42,7 @@ class SecurityConfig(
                     .requestMatchers(HttpMethod.GET, "/stripe/onboarding/refresh").permitAll()
                     .anyRequest().authenticated()
             }
+            .addFilterBefore(rateLimitFilter, UsernamePasswordAuthenticationFilter::class.java)
             .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter::class.java)
 
         return http.build()
