@@ -40,21 +40,55 @@ class RateLimitFilter(
             // Login endpoint: limit by IP address
             path == "/auth/login" && method == "POST" -> {
                 val ip = getClientIp(request)
-                Triple(
-                    rateLimiterService.resolveLoginBucket(ip),
-                    ip,
-                    "login"
+                RateLimitInfo(
+                    bucket = rateLimiterService.resolveLoginBucket(ip),
+                    key = ip,
+                    type = "login",
+                    userMessage = "Too many login attempts. Please wait before trying again."
                 )
             }
             
-            // Password reset: limit by IP address
-            // (ideally by email, but we'd need to parse request body)
+            // Registration endpoint: limit by IP address
+            path == "/auth/register" && method == "POST" -> {
+                val ip = getClientIp(request)
+                RateLimitInfo(
+                    bucket = rateLimiterService.resolveRegistrationBucket(ip),
+                    key = ip,
+                    type = "registration",
+                    userMessage = "Too many registration attempts. Please wait before trying again."
+                )
+            }
+            
+            // Password reset request: limit by IP address
             path == "/auth/password/forgot" && method == "POST" -> {
                 val ip = getClientIp(request)
-                Triple(
-                    rateLimiterService.resolvePasswordResetBucket(ip),
-                    ip,
-                    "password-reset"
+                RateLimitInfo(
+                    bucket = rateLimiterService.resolvePasswordResetBucket(ip),
+                    key = ip,
+                    type = "password-reset-request",
+                    userMessage = "Too many reset attempts. Please wait before requesting another reset link."
+                )
+            }
+            
+            // Password reset completion: limit by IP address
+            path == "/auth/password/reset" && method == "POST" -> {
+                val ip = getClientIp(request)
+                RateLimitInfo(
+                    bucket = rateLimiterService.resolvePasswordResetCompletionBucket(ip),
+                    key = ip,
+                    type = "password-reset-completion",
+                    userMessage = "Too many password reset attempts. Please wait before trying again."
+                )
+            }
+            
+            // Token validation: limit by IP address
+            path == "/auth/password/validate-token" && method == "POST" -> {
+                val ip = getClientIp(request)
+                RateLimitInfo(
+                    bucket = rateLimiterService.resolveTokenValidationBucket(ip),
+                    key = ip,
+                    type = "token-validation",
+                    userMessage = "Too many validation attempts. Please wait before trying again."
                 )
             }
             
@@ -62,10 +96,11 @@ class RateLimitFilter(
             path.startsWith("/tips") && method == "POST" -> {
                 val userId = getUserIdFromJwt(request)
                 if (userId != null) {
-                    Triple(
-                        rateLimiterService.resolveTipCreationBucket(userId),
-                        userId,
-                        "tip-creation"
+                    RateLimitInfo(
+                        bucket = rateLimiterService.resolveTipCreationBucket(userId),
+                        key = userId,
+                        type = "tip-creation",
+                        userMessage = "Too many tips created. Please wait before sending another tip."
                     )
                 } else {
                     // No JWT = not authenticated yet, security filter will block
@@ -78,10 +113,11 @@ class RateLimitFilter(
             else -> {
                 val userId = getUserIdFromJwt(request)
                 if (userId != null) {
-                    Triple(
-                        rateLimiterService.resolveGeneralApiBucket(userId),
-                        userId,
-                        "api"
+                    RateLimitInfo(
+                        bucket = rateLimiterService.resolveGeneralApiBucket(userId),
+                        key = userId,
+                        type = "api",
+                        userMessage = "Too many requests. Please wait before trying again."
                     )
                 } else {
                     // Public endpoint or not authenticated yet
@@ -91,10 +127,7 @@ class RateLimitFilter(
             }
         }
         
-        val (bucket, key, limitType) = bucketInfo
-        
-        // Try to consume 1 token from the bucket
-        val probe = bucket.tryConsumeAndReturnRemaining(1)
+        val probe = bucketInfo.bucket.tryConsumeAndReturnRemaining(1)
         
         if (probe.isConsumed) {
             // ✅ Request allowed - token available
@@ -106,22 +139,49 @@ class RateLimitFilter(
             // ❌ Rate limit exceeded
             val retryAfterSeconds = probe.nanosToWaitForRefill / 1_000_000_000
             
-            logger.warn("Rate limit exceeded: type=$limitType, key=${key.take(10)}..., path=$path, retryAfter=${retryAfterSeconds}s"
-)
+            logger.warn(
+                "⚠️ Rate limit exceeded: " +
+                "type=${bucketInfo.type}, " +
+                "key=${bucketInfo.key.take(10)}..., " +
+                "path=$path, " +
+                "method=$method, " +
+                "retryAfter=${retryAfterSeconds}s"
+            )
             
-            // Return 429 Too Many Requests
+            // Return 429 Too Many Requests with proper headers
             response.status = HttpStatus.TOO_MANY_REQUESTS.value()
-            response.contentType = "application/json"
-            response.setHeader("Retry-After", retryAfterSeconds.toString())
-            response.setHeader("X-RateLimit-Remaining", "0")
+            response.contentType = "application/json; charset=UTF-8"
             
+            // Standard Retry-After header (in seconds)
+            response.setHeader("Retry-After", retryAfterSeconds.toString())
+            
+            // Additional headers for debugging
+            response.setHeader("X-RateLimit-Limit", bucketInfo.bucket.availableTokens.toString())
+            response.setHeader("X-RateLimit-Remaining", "0")
+            response.setHeader("X-RateLimit-Reset", (System.currentTimeMillis() / 1000 + retryAfterSeconds).toString())
+            
+            // Return user-friendly error message
             response.writer.write("""
                 {
                     "error": "Rate limit exceeded",
-                    "message": "Too many requests. Please try again later.",
-                    "retryAfter": $retryAfterSeconds
+                    "message": "${bucketInfo.userMessage}",
+                    "retryAfter": $retryAfterSeconds,
+                    "retryAfterFormatted": "${formatRetryTime(retryAfterSeconds)}",
+                    "type": "${bucketInfo.type}",
+                    "timestamp": ${System.currentTimeMillis()}
                 }
             """.trimIndent())
+        }
+    }
+    
+    /**
+     * Format retry time into human-readable string
+     */
+    private fun formatRetryTime(seconds: Long): String {
+        return when {
+            seconds < 60 -> "$seconds seconds"
+            seconds < 3600 -> "${seconds / 60} minutes"
+            else -> "${seconds / 3600} hours"
         }
     }
     
@@ -161,4 +221,14 @@ class RateLimitFilter(
         val token = authHeader.substring(7)
         return token.take(20)
     }
+    
+    /**
+     * Data class to hold rate limit information
+     */
+    private data class RateLimitInfo(
+        val bucket: io.github.bucket4j.Bucket,
+        val key: String,
+        val type: String,
+        val userMessage: String
+    )
 }
