@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
 import org.springframework.stereotype.Component
 import org.springframework.web.filter.OncePerRequestFilter
+import org.springframework.web.util.ContentCachingResponseWrapper
 
 @Component
 class RateLimitFilter(
@@ -35,19 +36,14 @@ class RateLimitFilter(
             return
         }
         
+        // Special handling for login endpoint - only rate limit FAILED attempts
+        if (path == "/auth/login" && method == "POST") {
+            handleLoginRateLimit(request, response, filterChain)
+            return
+        }
+        
         // Determine which rate limit bucket to use based on endpoint
         val bucketInfo = when {
-            // Login endpoint: limit by IP address
-            path == "/auth/login" && method == "POST" -> {
-                val ip = getClientIp(request)
-                RateLimitInfo(
-                    bucket = rateLimiterService.resolveLoginBucket(ip),
-                    key = ip,
-                    type = "login",
-                    userMessage = "Too many login attempts. Please wait before trying again."
-                )
-            }
-            
             // Registration endpoint: limit by IP address
             path == "/auth/register" && method == "POST" -> {
                 val ip = getClientIp(request)
@@ -172,6 +168,74 @@ class RateLimitFilter(
                 }
             """.trimIndent())
         }
+    }
+    
+    /**
+     * Special handler for login endpoint that only rate limits FAILED attempts
+     * Successful logins are allowed without consuming rate limit tokens
+     */
+    private fun handleLoginRateLimit(
+        request: HttpServletRequest,
+        response: HttpServletResponse,
+        filterChain: FilterChain
+    ) {
+        val ip = getClientIp(request)
+        val bucket = rateLimiterService.resolveLoginBucket(ip)
+        
+        // Check if we have tokens available (but don't consume yet)
+        val probe = bucket.tryConsumeAndReturnRemaining(0)  // Check without consuming
+        
+        if (probe.remainingTokens <= 0) {
+            // ❌ Rate limit already exceeded - block the request
+            val retryAfterSeconds = probe.nanosToWaitForRefill / 1_000_000_000
+            
+            logger.warn(
+                "⚠️ Login rate limit exceeded: " +
+                "ip=${ip.take(10)}..., " +
+                "retryAfter=${retryAfterSeconds}s"
+            )
+            
+            response.status = HttpStatus.TOO_MANY_REQUESTS.value()
+            response.contentType = "application/json; charset=UTF-8"
+            response.setHeader("Retry-After", retryAfterSeconds.toString())
+            response.setHeader("X-RateLimit-Limit", "5")
+            response.setHeader("X-RateLimit-Remaining", "0")
+            response.setHeader("X-RateLimit-Reset", (System.currentTimeMillis() / 1000 + retryAfterSeconds).toString())
+            
+            response.writer.write("""
+                {
+                    "error": "Rate limit exceeded",
+                    "message": "Too many failed login attempts. Please wait before trying again.",
+                    "retryAfter": $retryAfterSeconds,
+                    "retryAfterFormatted": "${formatRetryTime(retryAfterSeconds)}",
+                    "type": "login",
+                    "timestamp": ${System.currentTimeMillis()}
+                }
+            """.trimIndent())
+            return
+        }
+        
+        // Wrap response to capture status code
+        val responseWrapper = ContentCachingResponseWrapper(response)
+        
+        // Allow the request to proceed
+        filterChain.doFilter(request, responseWrapper)
+        
+        // After the request is processed, check if login failed
+        val statusCode = responseWrapper.status
+        
+        if (statusCode == HttpStatus.UNAUTHORIZED.value()) {
+            // ❌ Login failed (401) - consume a token
+            bucket.tryConsumeAndReturnRemaining(1)
+            logger.info("🔒 Failed login attempt from $ip - consumed rate limit token")
+        } else if (statusCode == HttpStatus.OK.value()) {
+            // ✅ Login successful (200) - don't consume token
+            logger.info("✅ Successful login from $ip - rate limit token NOT consumed")
+        }
+        // For other status codes (400, 500, etc.), don't consume token
+        
+        // Copy the cached response back to original response
+        responseWrapper.copyBodyToResponse()
     }
     
     /**

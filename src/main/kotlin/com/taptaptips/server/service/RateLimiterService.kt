@@ -3,6 +3,7 @@ package com.taptaptips.server.service
 import io.github.bucket4j.Bandwidth
 import io.github.bucket4j.Bucket
 import io.github.bucket4j.Refill
+import org.springframework.cache.CacheManager
 import org.springframework.cache.annotation.Cacheable
 import org.springframework.stereotype.Service
 import java.time.Duration
@@ -19,13 +20,18 @@ import java.time.Duration
  * This prevents burst attacks while allowing legitimate usage
  */
 @Service
-class RateLimiterService {
+class RateLimiterService(
+    private val cacheManager: CacheManager
+) {
     
     /**
      * Rate limit for login attempts: 5 per 5 minutes per IP
      * 
      * This prevents brute force password attacks while allowing legitimate
      * users to retry a few times if they mistype their password.
+     * 
+     * IMPORTANT: This bucket only tracks FAILED login attempts.
+     * Successful logins do NOT consume tokens from this bucket.
      * 
      * After 5 failed attempts, users must wait 5 minutes.
      */
@@ -34,11 +40,20 @@ class RateLimiterService {
         return Bucket.builder()
             .addLimit(
                 Bandwidth.classic(
-                    5,  // capacity: 5 attempts
+                    5,  // capacity: 5 failed attempts allowed
                     Refill.intervally(5, Duration.ofMinutes(5))  // refill 5 every 5 min
                 )
             )
             .build()
+    }
+    
+    /**
+     * Reset the login rate limit bucket for a given IP after successful login
+     * This allows users to login/logout freely without hitting rate limits
+     */
+    fun resetLoginBucket(ip: String) {
+        val cache = cacheManager.getCache("rateLimitBuckets")
+        cache?.evict("login-$ip")
     }
     
     /**
