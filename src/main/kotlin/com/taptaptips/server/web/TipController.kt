@@ -138,6 +138,9 @@ fun getSentTips(
             recipientId = tip.receiver?.id?.toString() ?: "",
             recipientName = tip.receiver?.displayName ?: "Unknown",
             amount = tip.amount,
+            netAmount = tip.netAmount,           // ⭐ FIXED: Now includes net amount
+            totalFees = tip.totalFees,           // ⭐ FIXED: Now includes total fees
+            platformFee = tip.platformFee,       // ⭐ FIXED: Now includes platform fee
             createdAt = tip.createdAt.toString(),
             createdAtLocal = tip.createdAtLocal.toString(),  // ⭐ NEW
             timezone = tip.timezone                          // ⭐ NEW
@@ -164,6 +167,9 @@ data class SentTipSummaryDto(
     val recipientId: String,
     val recipientName: String,
     val amount: BigDecimal,
+    val netAmount: BigDecimal? = null,   // ⭐ FIXED: Added field
+    val totalFees: BigDecimal? = null,   // ⭐ FIXED: Added field  
+    val platformFee: BigDecimal? = null, // ⭐ FIXED: Added field
     val createdAt: String,
     val createdAtLocal: String,  // ⭐ NEW: "2025-12-29"
     val timezone: String          // ⭐ NEW: "America/Los_Angeles"
