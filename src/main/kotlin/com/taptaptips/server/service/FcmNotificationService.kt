@@ -4,12 +4,14 @@ import com.google.firebase.messaging.*
 import com.taptaptips.server.repo.FcmTokenRepository
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import java.math.BigDecimal
+import java.math.RoundingMode
 import java.time.Instant
 import java.util.UUID
 
 /**
  * Firebase Cloud Messaging service for push notifications.
- * Works for both Android and iOS devices.
+ * ⭐ UPDATED: Now uses cents to preserve decimal precision
  */
 @Service
 class FcmNotificationService(
@@ -19,13 +21,14 @@ class FcmNotificationService(
     
     /**
      * Send tip notification via FCM to all user's active devices.
-     * Returns true if at least one notification was sent successfully.
+     * 
+     * ⭐ UPDATED: Uses amountCents (e.g., 911 for $9.11) to preserve cents
      */
     fun sendTipNotification(
         receiverId: UUID,
         senderId: UUID,
         senderName: String,
-        amount: Int,
+        amountCents: Long,  // ⭐ CHANGED: Was Int amount, now Long amountCents
         tipId: UUID
     ): Boolean {
         val tokens = fcmTokenRepository.findByUser_IdAndIsActiveTrue(receiverId)
@@ -34,6 +37,11 @@ class FcmNotificationService(
             logger.info("📭 No FCM tokens for user $receiverId")
             return false
         }
+        
+        // ⭐ NEW: Convert cents to dollars with proper formatting
+        val amountDollars = BigDecimal(amountCents)
+            .divide(BigDecimal(100), 2, RoundingMode.HALF_UP)
+            .toPlainString()  // "9.11"
         
         logger.info("📤 Sending FCM notification to ${tokens.size} device(s) for user $receiverId")
         
@@ -48,7 +56,7 @@ class FcmNotificationService(
                     .setNotification(
                         Notification.builder()
                             .setTitle("💰 Tip Received!")
-                            .setBody("$$amount from $senderName")
+                            .setBody("$$amountDollars from $senderName")  // ⭐ CHANGED: Now shows cents
                             .build()
                     )
                     // Data payload for app to handle
@@ -56,7 +64,8 @@ class FcmNotificationService(
                     .putData("tipId", tipId.toString())
                     .putData("senderId", senderId.toString())
                     .putData("senderName", senderName)
-                    .putData("amount", amount.toString())
+                    .putData("amount", amountDollars)               // ⭐ CHANGED: String "9.11"
+                    .putData("amount_cents", amountCents.toString()) // ⭐ NEW: Also send cents
                     .putData("timestamp", System.currentTimeMillis().toString())
                     // Android-specific config
                     .setAndroidConfig(

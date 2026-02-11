@@ -2,22 +2,14 @@ package com.taptaptips.server.service
 
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import java.math.BigDecimal
+import java.math.RoundingMode
 import java.util.UUID
 
 /**
  * Notification service using Firebase Cloud Messaging (FCM) only.
  * 
- * Provides reliable push notifications for:
- * - App in foreground (shows notification + triggers in-app animation)
- * - App in background (shows notification)
- * - App closed (shows notification, opens app on tap)
- * 
- * Benefits over SSE:
- * - Works when app is closed
- * - Survives network changes
- * - Battery efficient (system-managed connection)
- * - Automatic retry and offline queuing
- * - 99.9% delivery rate via Google's infrastructure
+ * ⭐ UPDATED: Now uses cents (Long) to preserve decimal precision
  */
 @Service
 class NotificationService(
@@ -27,23 +19,25 @@ class NotificationService(
     
     /**
      * Send tip notification via FCM.
-     * Works whether app is open, backgrounded, or closed.
+     * 
+     * ⭐ UPDATED: Uses amountCents to preserve cents (e.g., 911 for $9.11)
      */
     fun notifyTipReceived(
         receiverId: UUID,
         senderId: UUID,
         senderName: String,
-        amount: Int,
+        amountCents: Long,  // ⭐ CHANGED: Was Int amount, now Long amountCents
         tipId: UUID
     ): Boolean {
-        logger.info("📬 Notifying user $receiverId about $$amount tip from $senderName")
+        val amountDollars = BigDecimal(amountCents).divide(BigDecimal(100), 2, RoundingMode.HALF_UP)
+        logger.info("📬 Notifying user $receiverId about $$amountDollars tip from $senderName")
         
         val success = try {
             fcmNotificationService.sendTipNotification(
                 receiverId = receiverId,
                 senderId = senderId,
                 senderName = senderName,
-                amount = amount,
+                amountCents = amountCents,  // ⭐ CHANGED: Pass cents
                 tipId = tipId
             )
         } catch (e: Exception) {
@@ -62,7 +56,6 @@ class NotificationService(
     
     /**
      * Send test notification to verify FCM is working.
-     * Useful for debugging and onboarding flow.
      */
     fun sendTestNotification(userId: UUID, message: String): Boolean {
         logger.info("🧪 Sending test notification to user $userId")
