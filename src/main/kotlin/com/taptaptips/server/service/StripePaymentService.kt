@@ -28,11 +28,11 @@ class StripePaymentService(
     @Value("\${stripe.processing.fee.fixed.cents:30}")
     private val processingFeeFixedCents: Long,
 
-    // Optional extra platform margin (set to 0 for pure break-even)
+    // TapTapTips platform fee (3% of transaction)
     @Value("\${stripe.platform.fee.fixed.cents:0}")
     private val platformFeeFixedCents: Long,
 
-    @Value("\${stripe.platform.fee.percent:0.0}")
+    @Value("\${stripe.platform.fee.percent:3.0}")
     private val platformFeePercent: BigDecimal,
 
     // Stripe minimum charge guard (USD typically $0.50)
@@ -368,6 +368,49 @@ class StripePaymentService(
         val normalized = amount.setScale(2, RoundingMode.HALF_UP)
         return normalized.movePointRight(2).longValueExact()
     }
+    
+    /**
+     * Calculate fee breakdown for transparency
+     * Returns detailed breakdown of all fees and what receiver actually gets
+     */
+    fun calculateFeeBreakdown(amount: BigDecimal): FeeBreakdown {
+        val amountCents = toCents(amount)
+        
+        // Stripe processing fee (2.9% + $0.30)
+        val stripePercentCents = BigDecimal(amountCents)
+            .multiply(processingFeePercent)
+            .divide(BigDecimal("100"), 10, RoundingMode.HALF_UP)
+            .setScale(0, RoundingMode.CEILING)
+            .longValueExact()
+        val stripeFeeCents = stripePercentCents + processingFeeFixedCents
+        
+        // Platform fee (3%)
+        val platformPercentCents = BigDecimal(amountCents)
+            .multiply(platformFeePercent)
+            .divide(BigDecimal("100"), 10, RoundingMode.HALF_UP)
+            .setScale(0, RoundingMode.CEILING)
+            .longValueExact()
+        val platformFeeCents = platformPercentCents + platformFeeFixedCents
+        
+        // Total application fee (what we charge)
+        val totalAppFeeCents = stripeFeeCents + platformFeeCents
+        
+        // What receiver gets
+        val receiverNetCents = amountCents - totalAppFeeCents
+        
+        return FeeBreakdown(
+            senderPaysCents = amountCents,
+            stripeFeeCents = stripeFeeCents,
+            platformFeeCents = platformFeeCents,
+            totalFeeCents = totalAppFeeCents,
+            receiverGetsCents = receiverNetCents,
+            senderPays = BigDecimal(amountCents).divide(BigDecimal(100), 2, RoundingMode.HALF_UP),
+            stripeFee = BigDecimal(stripeFeeCents).divide(BigDecimal(100), 2, RoundingMode.HALF_UP),
+            platformFee = BigDecimal(platformFeeCents).divide(BigDecimal(100), 2, RoundingMode.HALF_UP),
+            totalFee = BigDecimal(totalAppFeeCents).divide(BigDecimal(100), 2, RoundingMode.HALF_UP),
+            receiverGets = BigDecimal(receiverNetCents).divide(BigDecimal(100), 2, RoundingMode.HALF_UP)
+        )
+    }
     /**
      * Application fee is how we make the receiver "pay":
      * Receiver receives (amount - applicationFee).
@@ -464,3 +507,23 @@ class StripePaymentService(
         }
     }
 }
+
+/**
+ * Fee breakdown for transparency
+ * All amounts in both cents and dollars
+ */
+data class FeeBreakdown(
+    // Cents (for exact calculations)
+    val senderPaysCents: Long,       // What sender pays (original amount)
+    val stripeFeeCents: Long,        // Stripe processing fee (2.9% + $0.30)
+    val platformFeeCents: Long,      // TapTapTips platform fee (3%)
+    val totalFeeCents: Long,         // Total fees deducted
+    val receiverGetsCents: Long,     // What receiver actually receives
+    
+    // Dollars (for display)
+    val senderPays: BigDecimal,      // What sender pays (original amount)
+    val stripeFee: BigDecimal,       // Stripe processing fee
+    val platformFee: BigDecimal,     // TapTapTips platform fee
+    val totalFee: BigDecimal,        // Total fees deducted
+    val receiverGets: BigDecimal     // What receiver actually receives
+)

@@ -343,6 +343,34 @@ class StripeController(
     }
     
     /**
+     * Calculate fee breakdown for a given amount
+     * Shows sender what receiver will actually receive after fees
+     */
+    @GetMapping("/calculate-fees")
+    fun calculateFees(@RequestParam amount: BigDecimal): FeeBreakdownResponse {
+        logger.info("🧮 Calculating fees for amount: $$amount")
+        
+        val breakdown = stripeService.calculateFeeBreakdown(amount)
+        
+        logger.info("   Sender pays: $${breakdown.senderPays}")
+        logger.info("   Stripe fee: $${breakdown.stripeFee}")
+        logger.info("   Platform fee: $${breakdown.platformFee}")
+        logger.info("   Total fee: $${breakdown.totalFee}")
+        logger.info("   Receiver gets: $${breakdown.receiverGets}")
+        
+        return FeeBreakdownResponse(
+            senderPays = breakdown.senderPays,
+            stripeFee = breakdown.stripeFee,
+            platformFee = breakdown.platformFee,
+            totalFee = breakdown.totalFee,
+            receiverGets = breakdown.receiverGets,
+            stripePercent = "2.9",
+            stripeCents = "30",
+            platformPercent = "3.0"
+        )
+    }
+    
+    /**
      * Create payment intent for tip
      * If paymentMethodId is provided, use that specific card
      * Otherwise, use user's default payment method
@@ -482,4 +510,15 @@ data class PaymentIntentResponse(
     val receiverName: String,
     val receiverBankLast4: String?,
     val status: String
+)
+
+data class FeeBreakdownResponse(
+    val senderPays: BigDecimal,        // What sender pays (original amount)
+    val stripeFee: BigDecimal,         // Stripe processing fee
+    val platformFee: BigDecimal,       // TapTapTips platform fee (3%)
+    val totalFee: BigDecimal,          // Total fees deducted
+    val receiverGets: BigDecimal,      // What receiver actually receives
+    val stripePercent: String,         // "2.9" for display
+    val stripeCents: String,           // "30" for display  
+    val platformPercent: String        // "3.0" for display
 )
