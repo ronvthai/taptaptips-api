@@ -5,7 +5,8 @@ import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.repo.TipRepository
 import com.taptaptips.server.service.TipSecurityService
 import com.taptaptips.server.service.TipSecurityService.AlreadyProcessed
-import com.taptaptips.server.service.NotificationService 
+import com.taptaptips.server.service.NotificationService
+import com.taptaptips.server.service.StripePaymentService  // ⭐ NEW: Import for fee calculation
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.security.core.context.SecurityContextHolder
 import org.springframework.transaction.annotation.Transactional
@@ -22,7 +23,8 @@ class TipController(
     private val tips: TipRepository,
     private val users: AppUserRepository,
     private val security: TipSecurityService,
-    private val notificationService: NotificationService
+    private val notificationService: NotificationService,
+    private val stripeService: StripePaymentService  // ⭐ NEW: Inject StripePaymentService
 ) {
     private fun authUserId(): UUID =
         UUID.fromString(SecurityContextHolder.getContext().authentication.name)
@@ -38,38 +40,41 @@ fun create(@RequestBody req: CreateTipRequest): TipResult {
     val receiver = users.findById(v.receiverId).orElseThrow()
 
     return try {
-        // ⭐ NEW: Calculate local date from timezone
         val now = Instant.now()
-        val userZone = ZoneId.of(req.timezone)  // ⭐ NEW
-        val localDate = now.atZone(userZone).toLocalDate()  // ⭐ NEW
+        val userZone = ZoneId.of(req.timezone)
+        val localDate = now.atZone(userZone).toLocalDate()
+        
+        // ⭐ NEW: Calculate fee breakdown
+        val feeBreakdown = stripeService.calculateFeeBreakdown(v.amount)
         
         val tip = tips.save(
             Tip(
                 sender = sender,
                 receiver = receiver,
-                amount = v.amount,
+                amount = v.amount,                          // Gross amount (what sender paid)
+                netAmount = feeBreakdown.receiverGets,      // ⭐ NEW: Net amount (what receiver gets)
+                totalFees = feeBreakdown.totalFee,          // ⭐ NEW: Total fees
+                platformFee = feeBreakdown.platformFee,     // ⭐ NEW: Your 3% revenue
                 createdAt = now,
-                createdAtLocal = localDate,  // ⭐ NEW
-                timezone = req.timezone,     // ⭐ NEW
+                createdAtLocal = localDate,
+                timezone = req.timezone,
                 nonce = v.nonce,
                 timestamp = v.timestamp,
                 verified = true
             )
         )
         
-        // ⭐ UPDATED: Use hybrid notification service
-        // Automatically chooses SSE (if app open) or FCM (if app closed)
+        // ⭐ UPDATED: Send NET amount to notification (what receiver actually gets)
         notificationService.notifyTipReceived(
             receiverId = receiver.id!!,
             senderId = sender.id!!,
             senderName = sender.displayName,
-            amount = tip.amount.toInt(),
+            amount = feeBreakdown.receiverGets.toInt(),  // ⭐ CHANGED: Use net amount instead of gross
             tipId = tip.id!!
         )
         
         TipResult("CONFIRMED")
     } catch (e: DataIntegrityViolationException) {
-        // DB uniqueness race on (sender_id, nonce)
         TipResult("DUPLICATE")
     }
 }
@@ -80,10 +85,8 @@ fun getReceivedTips(
 ): List<TipSummaryDto> {
     val receiverId: UUID = authUserId()
     
-    // ⭐ SIMPLIFIED: Just parse the date, no timezone conversion!
     val targetDate: LocalDate = date?.let { LocalDate.parse(it) } ?: LocalDate.now()
     
-    // ⭐ NEW: Use fast local date query (10-200x faster!)
     val receivedTips: List<Tip> = tips.findByReceiver_IdAndCreatedAtLocal(
         receiverId, 
         targetDate
@@ -94,10 +97,13 @@ fun getReceivedTips(
             id = tip.id.toString(),
             senderId = tip.sender?.id?.toString() ?: "",
             senderName = tip.sender?.displayName ?: "Unknown",
-            amount = tip.amount,
+            amount = tip.amount,                      // Gross amount
+            netAmount = tip.netAmount,                // ⭐ NEW: Net amount
+            totalFees = tip.totalFees,                // ⭐ NEW: Total fees
+            platformFee = tip.platformFee,            // ⭐ NEW: Platform fee
             createdAt = tip.createdAt.toString(),
-            createdAtLocal = tip.createdAtLocal.toString(),  // ⭐ NEW: Include local date
-            timezone = tip.timezone                          // ⭐ NEW: Include timezone
+            createdAtLocal = tip.createdAtLocal.toString(),
+            timezone = tip.timezone
         )
     }
 }
@@ -109,13 +115,11 @@ fun getSentTips(
 ): List<SentTipSummaryDto> {
     val senderId: UUID = authUserId()
     
-    // ⭐ SIMPLIFIED: Just parse dates, no timezone conversion!
     val start: LocalDate = startDate?.let { LocalDate.parse(it) } 
         ?: LocalDate.now().withDayOfMonth(1)
     val end: LocalDate = endDate?.let { LocalDate.parse(it) } 
         ?: LocalDate.now()
     
-    // ⭐ NEW: Use fast local date query (10-200x faster!)
     val sentTips: List<Tip> = tips.findBySender_IdAndCreatedAtLocalBetween(
         senderId, 
         start, 
@@ -129,8 +133,8 @@ fun getSentTips(
             recipientName = tip.receiver?.displayName ?: "Unknown",
             amount = tip.amount,
             createdAt = tip.createdAt.toString(),
-            createdAtLocal = tip.createdAtLocal.toString(),  // ⭐ NEW
-            timezone = tip.timezone                          // ⭐ NEW
+            createdAtLocal = tip.createdAtLocal.toString(),
+            timezone = tip.timezone
         )
     }
 }
@@ -140,10 +144,13 @@ data class TipSummaryDto(
     val id: String,
     val senderId: String,
     val senderName: String,
-    val amount: BigDecimal,
+    val amount: BigDecimal,              // Gross amount (what sender paid)
+    val netAmount: BigDecimal?,          // ⭐ NEW: Net amount (what receiver gets)
+    val totalFees: BigDecimal?,          // ⭐ NEW: Total fees deducted
+    val platformFee: BigDecimal?,        // ⭐ NEW: Platform fee (your revenue)
     val createdAt: String,
-    val createdAtLocal: String,  // ⭐ NEW: "2025-12-29"
-    val timezone: String          // ⭐ NEW: "America/Los_Angeles"
+    val createdAtLocal: String,
+    val timezone: String
 )
 
 data class SentTipSummaryDto(
@@ -152,6 +159,6 @@ data class SentTipSummaryDto(
     val recipientName: String,
     val amount: BigDecimal,
     val createdAt: String,
-    val createdAtLocal: String,  // ⭐ NEW: "2025-12-29"
-    val timezone: String          // ⭐ NEW: "America/Los_Angeles"
+    val createdAtLocal: String,
+    val timezone: String
 )
