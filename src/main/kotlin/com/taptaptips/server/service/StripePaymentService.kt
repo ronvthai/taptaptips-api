@@ -180,33 +180,31 @@ class StripePaymentService(
             
             logger.info("✅ Onboarding status: $isOnboarded")
             
-            // Update if status changed
-            if (user.stripeOnboarded != isOnboarded) {
-                user.stripeOnboarded = isOnboarded
-                user.stripeLastChecked = Instant.now()
-                user.updatedAt = Instant.now()
-                
-                // Save bank info if available
-                if (isOnboarded && account.externalAccounts != null) {
-                    logger.info("💳 Checking for bank account info...")
-                    val bankAccount = account.externalAccounts.data
-                        .filterIsInstance<BankAccount>()
-                        .firstOrNull()
-                    
-                    if (bankAccount != null) {
-                        user.bankLast4 = bankAccount.last4
-                        user.bankName = bankAccount.bankName
-                        logger.info("   - Bank: ${bankAccount.bankName} ****${bankAccount.last4}")
-                    } else {
-                        logger.warn("   - No bank account found in external accounts")
-                    }
+            // Always update onboarding flag and timestamps
+            user.stripeOnboarded = isOnboarded
+            user.stripeLastChecked = Instant.now()
+            user.updatedAt = Instant.now()
+
+            // Always sync bank info from Stripe when onboarded —
+            // covers both first-time onboarding AND edits to an existing bank account
+            if (isOnboarded && account.externalAccounts != null) {
+                logger.info("💳 Checking for bank account info...")
+                val bankAccount = account.externalAccounts.data
+                    .filterIsInstance<BankAccount>()
+                    .firstOrNull()
+
+                if (bankAccount != null) {
+                    user.bankLast4 = bankAccount.last4
+                    user.bankName  = bankAccount.bankName
+                    logger.info("   - Bank: ${bankAccount.bankName} ****${bankAccount.last4}")
+                } else {
+                    logger.warn("   - No bank account found in external accounts")
                 }
-                
-                userRepository.save(user)
-                
-                logger.info("💾 User ${user.id} onboarding status updated: $isOnboarded")
             }
-            
+
+            userRepository.save(user)
+            logger.info("💾 User ${user.id} bank info synced — onboarded=$isOnboarded, last4=${user.bankLast4}, bank=${user.bankName}")
+
             return isOnboarded
             
         } catch (e: StripeException) {
