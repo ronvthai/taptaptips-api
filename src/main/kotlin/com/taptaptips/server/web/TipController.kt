@@ -5,7 +5,6 @@ import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.repo.TipRepository
 import com.taptaptips.server.service.TipSecurityService
 import com.taptaptips.server.service.TipSecurityService.AlreadyProcessed
-import com.taptaptips.server.service.NotificationService 
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.security.core.context.SecurityContextHolder
 import org.springframework.transaction.annotation.Transactional
@@ -22,7 +21,6 @@ class TipController(
     private val tips: TipRepository,
     private val users: AppUserRepository,
     private val security: TipSecurityService,
-    private val notificationService: NotificationService,
     private val stripeService: com.taptaptips.server.service.StripePaymentService  // ⭐ NEW: For fee calculation
 ) {
     private fun authUserId(): UUID =
@@ -64,16 +62,8 @@ fun create(@RequestBody req: CreateTipRequest): TipResult {
             )
         )
         
-        // ⭐ UPDATED: Send net amount in CENTS to notification
-        val amountCents = (feeBreakdown.receiverGets * java.math.BigDecimal(100)).toLong()
-        notificationService.notifyTipReceived(
-            receiverId = receiver.id!!,
-            senderId = sender.id!!,
-            senderName = sender.displayName,
-            amountCents = amountCents,  // ⭐ CHANGED: Pass cents, not dollars
-            tipId = tip.id!!
-        )
-        
+        // Notification is sent only after Stripe confirms charge.succeeded webhook —
+        // not here, so we never notify for a payment that fails or is declined.
         TipResult("CONFIRMED")
     } catch (e: DataIntegrityViolationException) {
         // DB uniqueness race on (sender_id, nonce)

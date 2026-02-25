@@ -7,6 +7,7 @@ import com.stripe.net.Webhook
 import com.taptaptips.server.domain.TipStatus
 import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.repo.TipRepository
+import com.taptaptips.server.service.NotificationService
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.http.HttpStatus
@@ -20,6 +21,7 @@ import java.util.UUID
 class StripeWebhookController(
     private val tipRepository: TipRepository,
     private val userRepository: AppUserRepository,
+    private val notificationService: NotificationService,
 
     @Value("\${stripe.webhook.secret}")
     private val webhookSecret: String
@@ -226,6 +228,24 @@ class StripeWebhookController(
             tip.updatedAt = Instant.now()
             tipRepository.save(tip)
             logger.info("✅ Marked tip ${tip.id} as SUCCEEDED")
+
+            // Stripe has confirmed the charge — now it's safe to notify the receiver
+            val receiver = tip.receiver
+            val sender   = tip.sender
+            if (receiver?.id != null && sender?.id != null) {
+                val netAmount = tip.netAmount ?: tip.amount
+                val amountCents = (netAmount * java.math.BigDecimal(100)).toLong()
+                notificationService.notifyTipReceived(
+                    receiverId  = receiver.id!!,
+                    senderId    = sender.id!!,
+                    senderName  = sender.displayName,
+                    amountCents = amountCents,
+                    tipId       = tip.id
+                )
+                logger.info("📬 Notification sent to receiver ${receiver.id} for tip ${tip.id}")
+            } else {
+                logger.warn("⚠️ Could not send notification — missing sender or receiver on tip ${tip.id}")
+            }
         } else {
             logger.warn("⚠️ Could not find tip for payment intent: $paymentIntentId (likely fixture/test)")
         }
