@@ -44,9 +44,12 @@ interface TipRepository : JpaRepository<Tip, UUID> {
         date: LocalDate
     ): List<Tip>
 
-    // Add these methods to your existing TipRepository interface
-    fun findByPaymentIntentId(paymentIntentId: String): Tip?
-    fun findByChargeId(chargeId: String): Tip?
+    // Eagerly fetch sender + receiver so webhook handlers never get lazy-load nulls
+    @Query("SELECT t FROM Tip t LEFT JOIN FETCH t.sender LEFT JOIN FETCH t.receiver WHERE t.paymentIntentId = :id")
+    fun findByPaymentIntentId(@Param("id") id: String): Tip?
+
+    @Query("SELECT t FROM Tip t LEFT JOIN FETCH t.sender LEFT JOIN FETCH t.receiver WHERE t.chargeId = :id")
+    fun findByChargeId(@Param("id") id: String): Tip?
     fun findByNonce(nonce: String): Tip?
     fun countBySender_Id(senderId: UUID): Long
 

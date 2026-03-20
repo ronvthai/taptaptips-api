@@ -5,6 +5,7 @@ import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.repo.TipRepository
 import com.taptaptips.server.service.TipSecurityService
 import com.taptaptips.server.service.TipSecurityService.AlreadyProcessed
+import com.taptaptips.server.service.NotificationService
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.security.core.context.SecurityContextHolder
 import org.springframework.transaction.annotation.Transactional
@@ -21,7 +22,8 @@ class TipController(
     private val tips: TipRepository,
     private val users: AppUserRepository,
     private val security: TipSecurityService,
-    private val stripeService: com.taptaptips.server.service.StripePaymentService
+    private val stripeService: com.taptaptips.server.service.StripePaymentService,
+    private val notificationService: NotificationService
 ) {
     private fun authUserId(): UUID =
         UUID.fromString(SecurityContextHolder.getContext().authentication.name)
@@ -58,6 +60,15 @@ class TipController(
                     timestamp = v.timestamp,
                     verified = true
                 )
+            )
+
+            // Notify receiver immediately — webhook notification is a secondary fallback
+            notificationService.notifyTipReceived(
+                receiverId = receiver.id!!,
+                senderId   = sender.id!!,
+                senderName = sender.displayName,
+                amountCents = (feeBreakdown.receiverGets * java.math.BigDecimal(100)).toLong(),
+                tipId      = tip.id!!
             )
 
             TipResult("CONFIRMED")
