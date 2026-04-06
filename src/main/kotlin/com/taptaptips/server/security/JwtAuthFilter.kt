@@ -9,6 +9,9 @@ import org.springframework.security.core.context.SecurityContextHolder
 import org.springframework.stereotype.Component
 import org.springframework.web.filter.OncePerRequestFilter
 
+/** Attribute key used to pass the verified user ID to downstream filters (e.g. RateLimitFilter). */
+const val ATTR_VERIFIED_USER_ID = "ttt.verifiedUserId"
+
 @Component
 class JwtAuthFilter(
     private val jwt: JwtService
@@ -25,12 +28,7 @@ class JwtAuthFilter(
             ?.takeIf { it.startsWith("Bearer ") }
             ?.removePrefix("Bearer ")
             ?.trim()
-        // 🔍 DEBUG: Log SSE connection attempts
-        if (req.requestURI.contains("/notifications/stream")) {
-            log.info("🔍 SSE connection attempt from ${req.remoteAddr}")
-            log.info("🔍 Has Authorization header: ${bearer != null}")
-            log.info("🔍 Token length: ${bearer?.length}")
-        }
+
         if (bearer != null) {
             try {
                 val uid = jwt.parse(bearer)
@@ -40,16 +38,14 @@ class JwtAuthFilter(
                     emptyList()
                 )
                 SecurityContextHolder.getContext().authentication = auth
-                // 🔍 DEBUG: Log successful auth
-                if (req.requestURI.contains("/notifications/stream")) {
-                    log.info("✅ JWT validated for user: $uid")
-                }
+
+                // Store verified user ID so RateLimitFilter can use it without re-parsing the JWT
+                req.setAttribute(ATTR_VERIFIED_USER_ID, uid.toString())
+
             } catch (e: Exception) {
-                if (req.requestURI.contains("/notifications/stream")) {
-                    log.error("❌ JWT validation failed for SSE: ${e.message}", e)
-                } else {
-                    log.debug("JWT validation failed: ${e.message}")
-                }
+                // Invalid / expired token — SecurityContext stays empty and Spring Security
+                // will reject the request at the authorizeHttpRequests layer.
+                log.debug("JWT validation failed: ${e.message}")
             }
         }
 

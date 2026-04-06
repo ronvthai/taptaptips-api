@@ -51,14 +51,14 @@ class AuthController(
                 ))
         }
         
-        // Validate password strength
-        if (r.password.length < 6) {
+        // Validate password strength (NIST SP 800-63B / Play financial-app guideline: 8+ chars)
+        if (r.password.length < 8) {
             logger.warn("❌ Registration failed: Password too short")
             return ResponseEntity
                 .status(HttpStatus.BAD_REQUEST)
                 .body(ErrorResponse(
                     error = "Password too short",
-                    message = "Password must be at least 6 characters long"
+                    message = "Password must be at least 8 characters long"
                 ))
         }
         

@@ -18,7 +18,8 @@ import java.util.*
 class StripePaymentService(
     private val userRepository: AppUserRepository,
 
-    @Value("\${app.base.url:http://192.168.1.153}")
+    // Set APP_BASE_URL in Render environment variables (e.g. https://taptaptips.com)
+    @Value("\${app.base.url}")
     private val baseUrl: String,
 
     // Break-even fee model (defaults to Stripe US online card 2.9% + 30¢)

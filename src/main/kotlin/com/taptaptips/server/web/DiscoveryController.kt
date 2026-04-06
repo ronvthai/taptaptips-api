@@ -1,131 +1,83 @@
 package com.taptaptips.server.web
 
 import com.taptaptips.server.repo.AppUserRepository
+import org.springframework.http.HttpStatus
 import org.springframework.web.bind.annotation.*
+import org.springframework.web.server.ResponseStatusException
 import java.util.UUID
 
 /**
- * Controller for BLE discovery-related endpoints
- * 
- * Handles both UUID-based and email-based discovery
+ * Controller for BLE discovery-related endpoints.
+ *
+ * All user lookups use indexed repository queries — no more findAll() table scans.
  */
 @RestController
 @RequestMapping("/discovery")
 class DiscoveryController(
     private val users: AppUserRepository
 ) {
-    
+
     /**
-     * Resolve user by email address (PRIMARY METHOD for BLE discovery)
-     * 
-     * BLE advertisements now broadcast the user's email address directly.
-     * This endpoint resolves the email to full user profile info.
-     * 
-     * Example:
-     *   Email: "player2@gmail.com"
-     *   Returns: {userId, displayName, hasAvatar, etc.}
+     * Resolve a user by their exact email address (primary BLE discovery method).
+     *
+     * Uses the citext UNIQUE index — O(log n).
      */
     @GetMapping("/resolve/email/{email}")
     fun resolveByEmail(@PathVariable email: String): UserDiscoveryDto {
-        // Try exact match first
-    var user = users.findByEmail(email)
-    
-    // If no exact match, try prefix match
-    if (user == null) {
-        val matchingUsers = users.findAll().filter { u ->
-            u.email.substringBefore("@").equals(email, ignoreCase = true)
-        }
-        user = matchingUsers.firstOrNull()
+        val normalized = email.trim().lowercase()
+
+        // Exact match via indexed column
+        val user = users.findByEmail(normalized)
+            ?: throw UserNotFoundException("No user found with email: $email")
+
+        return user.toDiscoveryDto()
     }
-    
-    if (user == null) {
-        throw UserNotFoundException("No user found with email: $email")
-    }
-        return UserDiscoveryDto(
-            userId = user.id.toString(),
-            username = user.displayName,
-            displayName = user.displayName,
-            email = user.email,
-            hasAvatar = user.profilePicture != null
-        )
-    }
-    
+
     /**
-     * Batch resolve by email addresses
+     * Batch resolve by email addresses. Skips emails that don't exist.
      */
     @PostMapping("/resolve-batch-email")
     fun resolveByEmails(@RequestBody request: BatchResolveEmailRequest): BatchResolveResponse {
         val results = request.emails.mapNotNull { email ->
-            try {
-                resolveByEmail(email)
-            } catch (e: Exception) {
-                // Skip emails that don't exist
-                null
-            }
+            runCatching { resolveByEmail(email) }.getOrNull()
         }
-        
         return BatchResolveResponse(results = results)
     }
-    
+
     /**
-     * Resolve short user ID to full user info (LEGACY - for backward compatibility)
-     * 
-     * BLE advertisements used to broadcast only the first 8 characters of the UUID.
-     * This endpoint is kept for backward compatibility.
+     * Resolve a short user ID (first 8 hex chars of the UUID) to a user.
+     *
+     * Uses a prefix LIKE query against the primary key — no table scan.
+     * Kept for backward compatibility with older BLE advertisement payloads.
      */
     @GetMapping("/resolve/{shortId}")
     fun resolveShortId(@PathVariable shortId: String): UserDiscoveryDto {
-        // Short ID should be 8 hex characters
         if (shortId.length != 8 || !shortId.matches(Regex("[0-9a-f]{8}"))) {
-            throw IllegalArgumentException("Invalid short ID format")
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid short ID format — expected 8 hex characters")
         }
-        
-        // Search for user whose UUID starts with this short ID
-        val matchingUsers = users.findAll().filter { user ->
-            user.id.toString().replace("-", "").startsWith(shortId, ignoreCase = true)
+
+        val matches = users.findByIdPrefix(shortId)
+
+        return when (matches.size) {
+            0    -> throw UserNotFoundException("No user found with short ID: $shortId")
+            1    -> matches.first().toDiscoveryDto()
+            else -> throw MultipleUsersFoundException("Multiple users match short ID: $shortId")
         }
-        
-        if (matchingUsers.isEmpty()) {
-            throw UserNotFoundException("No user found with short ID: $shortId")
-        }
-        
-        if (matchingUsers.size > 1) {
-            throw MultipleUsersFoundException(
-                "Multiple users found with short ID: $shortId"
-            )
-        }
-        
-        val user = matchingUsers.first()
-        
-        return UserDiscoveryDto(
-            userId = user.id.toString(),
-            username = user.displayName,
-            displayName = user.displayName,
-            email = user.email,
-            hasAvatar = user.profilePicture != null
-        )
     }
-    
+
     /**
-     * Get multiple user info from short IDs (batch endpoint - LEGACY)
+     * Batch resolve short IDs. Skips IDs that don't resolve.
      */
     @PostMapping("/resolve-batch")
     fun resolveShortIds(@RequestBody request: BatchResolveRequest): BatchResolveResponse {
         val results = request.shortIds.mapNotNull { shortId ->
-            try {
-                resolveShortId(shortId)
-            } catch (e: Exception) {
-                null
-            }
+            runCatching { resolveShortId(shortId) }.getOrNull()
         }
-        
-        return BatchResolveResponse(
-            results = results
-        )
+        return BatchResolveResponse(results = results)
     }
-    
+
     /**
-     * Search users by display name
+     * Display-name search — uses indexed LIKE query, capped at 50.
      */
     @GetMapping("/search")
     fun searchUsers(
@@ -133,29 +85,25 @@ class DiscoveryController(
         @RequestParam("limit", defaultValue = "10") limit: Int
     ): List<UserDiscoveryDto> {
         if (query.length < 2) {
-            throw IllegalArgumentException("Query must be at least 2 characters")
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Query must be at least 2 characters")
         }
-        
-        // Filter users by displayName containing query (case-insensitive)
-        val results = users.findAll()
-            .filter { user ->
-                user.displayName.contains(query, ignoreCase = true)
-            }
-            .take(limit.coerceAtMost(50))
-        
-        return results.map { user ->
-            UserDiscoveryDto(
-                userId = user.id.toString(),
-                username = user.displayName,
-                displayName = user.displayName,
-                email = user.email,
-                hasAvatar = user.profilePicture != null
-            )
-        }
+        return users.searchByDisplayName(query)
+            .take(limit.coerceIn(1, 50))
+            .map { it.toDiscoveryDto() }
     }
+
+    // ── helpers ─────────────────────────────────────────────────────────────
+
+    private fun com.taptaptips.server.domain.AppUser.toDiscoveryDto() = UserDiscoveryDto(
+        userId      = id.toString(),
+        username    = displayName,
+        displayName = displayName,
+        email       = email,
+        hasAvatar   = profilePicture != null
+    )
 }
 
-// ========== DTOs ==========
+// ── DTOs ────────────────────────────────────────────────────────────────────
 
 data class UserDiscoveryDto(
     val userId: String,
@@ -165,20 +113,11 @@ data class UserDiscoveryDto(
     val hasAvatar: Boolean
 )
 
-data class BatchResolveRequest(
-    val shortIds: List<String>
-)
+data class BatchResolveRequest(val shortIds: List<String>)
+data class BatchResolveEmailRequest(val emails: List<String>)
+data class BatchResolveResponse(val results: List<UserDiscoveryDto>)
 
-data class BatchResolveEmailRequest(
-    val emails: List<String>
-)
-
-data class BatchResolveResponse(
-    val results: List<UserDiscoveryDto>
-)
-
-// ========== Exceptions ==========
+// ── exceptions ───────────────────────────────────────────────────────────────
 
 class UserNotFoundException(message: String) : RuntimeException(message)
-
 class MultipleUsersFoundException(message: String) : RuntimeException(message)

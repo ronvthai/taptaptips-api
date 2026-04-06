@@ -30,7 +30,13 @@ class StripeController(
     @GetMapping("/receiver/status/{userId}")
     fun getOnboardingStatus(@PathVariable userId: String): OnboardingStatusResponse {
         logger.info("📊 Checking onboarding status for user $userId")
-        
+
+        // IDOR fix: caller must be the same user they are querying
+        val callerId = authUserId()
+        if (callerId != UUID.fromString(userId)) {
+            throw ResponseStatusException(HttpStatus.FORBIDDEN, "You may only check your own onboarding status")
+        }
+
         val user = userRepository.findById(UUID.fromString(userId)).orElseThrow {
             ResponseStatusException(HttpStatus.NOT_FOUND, "User not found")
         }
@@ -54,7 +60,13 @@ class StripeController(
     @GetMapping("/receiver/onboarding-link/{userId}")
     fun getOnboardingLink(@PathVariable userId: String): OnboardingLinkResponse {
         logger.info("🔗 Generating onboarding link for user $userId")
-        
+
+        // IDOR fix: caller must be the same user they are requesting a link for
+        val callerId = authUserId()
+        if (callerId != UUID.fromString(userId)) {
+            throw ResponseStatusException(HttpStatus.FORBIDDEN, "You may only request your own onboarding link")
+        }
+
         val user = userRepository.findById(UUID.fromString(userId)).orElseThrow {
             ResponseStatusException(HttpStatus.NOT_FOUND, "User not found")
         }
