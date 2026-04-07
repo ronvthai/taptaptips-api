@@ -1,11 +1,13 @@
 package com.taptaptips.server.web
 
 import com.taptaptips.server.domain.Tip
+import com.taptaptips.server.domain.TipStatus
 import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.repo.TipRepository
 import com.taptaptips.server.service.TipSecurityService
 import com.taptaptips.server.service.TipSecurityService.AlreadyProcessed
 import com.taptaptips.server.service.NotificationService
+import org.slf4j.LoggerFactory
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Sort
@@ -27,14 +29,31 @@ class TipController(
     private val stripeService: com.taptaptips.server.service.StripePaymentService,
     private val notificationService: NotificationService
 ) {
+    private val log = LoggerFactory.getLogger(javaClass)
+
     companion object {
         private const val DEFAULT_PAGE_SIZE = 50
-        private const val MAX_PAGE_SIZE = 200
+        private const val MAX_PAGE_SIZE     = 200
     }
 
     private fun authUserId(): UUID =
         UUID.fromString(SecurityContextHolder.getContext().authentication.name)
 
+    /**
+     * POST /tips
+     *
+     * FIX — Orphan tip on Stripe failure:
+     *   Tip is saved as PENDING, then Stripe is called inside a try/catch.
+     *   On any Stripe exception the tip is immediately marked FAILED — no orphan
+     *   PENDING rows that will never settle.
+     *
+     * FIX — Double FCM notification:
+     *   The immediate notifyTipReceived() call has been removed.
+     *   StripeWebhookController.handleChargeSucceeded() is the single notification
+     *   path. It fires after Stripe confirms funds are captured — the correct moment
+     *   to tell the receiver money is on the way. The old pre-confirm notification
+     *   fired on tips that could still fail (declined cards, etc.).
+     */
     @PostMapping
     @Transactional
     fun create(@RequestBody req: CreateTipRequest): TipResult {
@@ -42,40 +61,64 @@ class TipController(
         val v = try { security.verifyRequest(req, auth) }
                 catch (e: AlreadyProcessed) { return TipResult("DUPLICATE") }
 
-        val sender = users.findById(v.senderId).orElseThrow()
+        val sender   = users.findById(v.senderId).orElseThrow()
         val receiver = users.findById(v.receiverId).orElseThrow()
 
-        return try {
-            val now = Instant.now()
-            val userZone = ZoneId.of(req.timezone)
-            val localDate = now.atZone(userZone).toLocalDate()
+        val receiverStripeAccountId = receiver.stripeAccountId
+            ?: return TipResult("RECEIVER_NOT_ONBOARDED")
+        val senderCustomerId = sender.stripeCustomerId
+            ?: return TipResult("SENDER_NOT_SETUP")
+        val paymentMethodId = sender.defaultPaymentMethodId
+            ?: return TipResult("NO_PAYMENT_METHOD")
 
+        return try {
+            val now          = Instant.now()
+            val localDate    = now.atZone(ZoneId.of(req.timezone)).toLocalDate()
             val feeBreakdown = stripeService.calculateFeeBreakdown(v.amount)
 
             val tip = tips.save(
                 Tip(
-                    sender = sender,
-                    receiver = receiver,
-                    amount = v.amount,
-                    netAmount = feeBreakdown.receiverGets,
-                    totalFees = feeBreakdown.totalFee,
-                    platformFee = feeBreakdown.platformFee,
-                    createdAt = now,
+                    sender         = sender,
+                    receiver       = receiver,
+                    amount         = v.amount,
+                    netAmount      = feeBreakdown.receiverGets,
+                    totalFees      = feeBreakdown.totalFee,
+                    platformFee    = feeBreakdown.platformFee,
+                    createdAt      = now,
                     createdAtLocal = localDate,
-                    timezone = req.timezone,
-                    nonce = v.nonce,
-                    timestamp = v.timestamp,
-                    verified = true
+                    timezone       = req.timezone,
+                    nonce          = v.nonce,
+                    timestamp      = v.timestamp,
+                    verified       = true,
+                    status         = TipStatus.PENDING
                 )
             )
 
-            notificationService.notifyTipReceived(
-                receiverId  = receiver.id!!,
-                senderId    = sender.id!!,
-                senderName  = sender.displayName,
-                amountCents = (feeBreakdown.receiverGets * java.math.BigDecimal(100)).toLong(),
-                tipId       = tip.id!!
-            )
+            // Stripe call wrapped — any failure marks the tip FAILED immediately
+            val paymentIntent = try {
+                stripeService.createPaymentIntentWithSavedMethod(
+                    amount                  = v.amount,
+                    receiverStripeAccountId = receiverStripeAccountId,
+                    senderId                = v.senderId,
+                    receiverId              = v.receiverId,
+                    tipNonce                = v.nonce,
+                    paymentMethodId         = paymentMethodId,
+                    senderCustomerId        = senderCustomerId
+                )
+            } catch (e: Exception) {
+                log.error("❌ Stripe PaymentIntent failed for tip ${tip.id}: ${e.message}")
+                tip.status        = TipStatus.FAILED
+                tip.failureReason = e.message
+                tip.updatedAt     = Instant.now()
+                tips.save(tip)
+                return TipResult("PAYMENT_FAILED")
+            }
+
+            tip.paymentIntentId = paymentIntent.id
+            tip.updatedAt       = Instant.now()
+            tips.save(tip)
+
+            // Notification intentionally removed — webhook fires after Stripe confirms
 
             TipResult("CONFIRMED")
         } catch (e: DataIntegrityViolationException) {
@@ -83,18 +126,6 @@ class TipController(
         }
     }
 
-    /**
-     * GET /tips/received
-     *
-     * Query params:
-     *   startDate + endDate  → inclusive range (ISO dates: yyyy-MM-dd)
-     *   date                 → single day, defaults to today
-     *   page                 → 0-based page index (default 0)
-     *   size                 → page size, capped at MAX_PAGE_SIZE (default 50)
-     *
-     * FIX: uses FETCH JOIN queries — sender/receiver loaded in the same SQL
-     * statement as the tips. No N+1 lazy loads, no unbounded result sets.
-     */
     @GetMapping("/received")
     fun getReceivedTips(
         @RequestParam(required = false) date: String?,
@@ -104,38 +135,28 @@ class TipController(
         @RequestParam(defaultValue = "$DEFAULT_PAGE_SIZE") size: Int
     ): TipPageResult {
         val receiverId = authUserId()
-        val pageable = PageRequest.of(page, size.coerceAtMost(MAX_PAGE_SIZE), Sort.by("createdAt").descending())
+        val pageable   = PageRequest.of(page, size.coerceAtMost(MAX_PAGE_SIZE), Sort.by("createdAt").descending())
 
         val tipPage = when {
             startDate != null && endDate != null ->
                 tips.findByReceiver_IdAndCreatedAtLocalBetween(
-                    receiverId,
-                    LocalDate.parse(startDate),
-                    LocalDate.parse(endDate),
-                    pageable
+                    receiverId, LocalDate.parse(startDate), LocalDate.parse(endDate), pageable
                 )
             else ->
                 tips.findByReceiver_IdAndCreatedAtLocal(
-                    receiverId,
-                    date?.let { LocalDate.parse(it) } ?: LocalDate.now(),
-                    pageable
+                    receiverId, date?.let { LocalDate.parse(it) } ?: LocalDate.now(), pageable
                 )
         }
 
         return TipPageResult(
-            tips = tipPage.content.map { it.toReceivedDto() },
+            tips          = tipPage.content.map { it.toReceivedDto() },
             totalElements = tipPage.totalElements,
-            totalPages = tipPage.totalPages,
-            page = page,
-            size = tipPage.numberOfElements
+            totalPages    = tipPage.totalPages,
+            page          = page,
+            size          = tipPage.numberOfElements
         )
     }
 
-    /**
-     * GET /tips/sent
-     *
-     * FIX: same FETCH JOIN + pagination treatment as /received.
-     */
     @GetMapping("/sent")
     fun getSentTips(
         @RequestParam(required = false) startDate: String?,
@@ -152,17 +173,13 @@ class TipController(
         val tipPage = tips.findBySender_IdAndCreatedAtLocalBetween(senderId, start, end, pageable)
 
         return TipPageResult(
-            tips = tipPage.content.map { it.toSentDto() },
+            tips          = tipPage.content.map { it.toSentDto() },
             totalElements = tipPage.totalElements,
-            totalPages = tipPage.totalPages,
-            page = page,
-            size = tipPage.numberOfElements
+            totalPages    = tipPage.totalPages,
+            page          = page,
+            size          = tipPage.numberOfElements
         )
     }
-
-    // ── Mapping helpers ──────────────────────────────────────────────────────
-    // Defined as extension funs so the controller stays readable and the
-    // mapping is co-located with the types it touches.
 
     private fun Tip.toReceivedDto() = TipSummaryDto(
         id             = id.toString(),
@@ -178,23 +195,21 @@ class TipController(
     )
 
     private fun Tip.toSentDto() = SentTipSummaryDto(
-        id            = id.toString(),
-        recipientId   = receiver?.id?.toString() ?: "",
-        recipientName = receiver?.displayName    ?: "Unknown",
-        amount        = amount,
-        netAmount     = netAmount,
-        totalFees     = totalFees,
-        platformFee   = platformFee,
-        createdAt     = createdAt.toString(),
+        id             = id.toString(),
+        recipientId    = receiver?.id?.toString() ?: "",
+        recipientName  = receiver?.displayName   ?: "Unknown",
+        amount         = amount,
+        netAmount      = netAmount,
+        totalFees      = totalFees,
+        platformFee    = platformFee,
+        createdAt      = createdAt.toString(),
         createdAtLocal = createdAtLocal.toString(),
-        timezone      = timezone
+        timezone       = timezone
     )
 }
 
-// ── Response types ───────────────────────────────────────────────────────────
-
 data class TipPageResult(
-    val tips: List<Any>,          // TipSummaryDto or SentTipSummaryDto
+    val tips: List<Any>,
     val totalElements: Long,
     val totalPages: Int,
     val page: Int,
@@ -206,8 +221,8 @@ data class TipSummaryDto(
     val senderId: String,
     val senderName: String,
     val amount: BigDecimal,
-    val netAmount: BigDecimal? = null,
-    val totalFees: BigDecimal? = null,
+    val netAmount: BigDecimal?   = null,
+    val totalFees: BigDecimal?   = null,
     val platformFee: BigDecimal? = null,
     val createdAt: String,
     val createdAtLocal: String,
@@ -219,8 +234,8 @@ data class SentTipSummaryDto(
     val recipientId: String,
     val recipientName: String,
     val amount: BigDecimal,
-    val netAmount: BigDecimal? = null,
-    val totalFees: BigDecimal? = null,
+    val netAmount: BigDecimal?   = null,
+    val totalFees: BigDecimal?   = null,
     val platformFee: BigDecimal? = null,
     val createdAt: String,
     val createdAtLocal: String,

@@ -18,431 +18,272 @@ import java.util.*
 class StripePaymentService(
     private val userRepository: AppUserRepository,
 
-    // Set APP_BASE_URL in Render environment variables (e.g. https://taptaptips.com)
     @Value("\${app.base.url}")
     private val baseUrl: String,
 
-    // Break-even fee model (defaults to Stripe US online card 2.9% + 30¢)
     @Value("\${stripe.processing.fee.percent:2.9}")
     private val processingFeePercent: BigDecimal,
 
     @Value("\${stripe.processing.fee.fixed.cents:30}")
     private val processingFeeFixedCents: Long,
 
-    // TapTapTips platform fee (3% of transaction)
     @Value("\${stripe.platform.fee.fixed.cents:0}")
     private val platformFeeFixedCents: Long,
 
     @Value("\${stripe.platform.fee.percent:3.0}")
     private val platformFeePercent: BigDecimal,
 
-    // Stripe minimum charge guard (USD typically $0.50)
     @Value("\${stripe.minimum.charge.cents:50}")
     private val minimumChargeCents: Long
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
-    
-    // ==================== RECEIVER METHODS (EXISTING) ====================
-    
-    /**
-     * Create a Stripe Connected Account for receiving tips
-     */
+
+    // ── Receiver onboarding ──────────────────────────────────────────────────
+
     @Transactional
     fun createConnectedAccount(user: AppUser): String {
-        // Don't create if already exists
         if (user.stripeAccountId != null) {
             logger.info("User ${user.id} already has Stripe account: ${user.stripeAccountId}")
             return user.stripeAccountId!!
         }
-        
         try {
-            // Parse display name into first/last name (best effort)
             val nameParts = user.displayName.trim().split(" ", limit = 2)
-            val firstName = nameParts.getOrNull(0) ?: user.displayName
-            val lastName = nameParts.getOrNull(1) ?: ""
-            
-            val accountParams = AccountCreateParams.builder()
-                .setType(AccountCreateParams.Type.EXPRESS)
-                .setEmail(user.email)
-                .setBusinessType(AccountCreateParams.BusinessType.INDIVIDUAL)
-                // Pre-fill individual info
-                .setIndividual(
-                    AccountCreateParams.Individual.builder()
-                        .setEmail(user.email)
-                        .setFirstName(firstName)
-                        .setLastName(lastName)
-                        .build()
-                )
-                .setCapabilities(
-                    AccountCreateParams.Capabilities.builder()
-                        .setCardPayments(
-                            AccountCreateParams.Capabilities.CardPayments.builder()
-                                .setRequested(true)
-                                .build()
-                        )
-                        .setTransfers(
-                            AccountCreateParams.Capabilities.Transfers.builder()
-                                .setRequested(true)
-                                .build()
-                        )
-                        .build()
-                )
-                // Pre-fill business profile to avoid manual entry during onboarding
-                .setBusinessProfile(
-                    AccountCreateParams.BusinessProfile.builder()
-                        .setMcc("7399")  // Personal services MCC code
-                        .setProductDescription("Personal tipping and service payments")  // Pre-fill description
-                        .build()
-                )
-                .setMetadata(
-                    mapOf(
-                        "user_id" to user.id.toString(),
-                        "email" to user.email,
-                        "display_name" to user.displayName
+            val account = Account.create(
+                AccountCreateParams.builder()
+                    .setType(AccountCreateParams.Type.EXPRESS)
+                    .setEmail(user.email)
+                    .setBusinessType(AccountCreateParams.BusinessType.INDIVIDUAL)
+                    .setIndividual(
+                        AccountCreateParams.Individual.builder()
+                            .setEmail(user.email)
+                            .setFirstName(nameParts.getOrNull(0) ?: user.displayName)
+                            .setLastName(nameParts.getOrNull(1) ?: "")
+                            .build()
                     )
-                )
-                .build()
-            
-            val account = Account.create(accountParams)
-            
-            // Save to database
-            user.stripeAccountId = account.id
-            user.stripeOnboarded = false
+                    .setCapabilities(
+                        AccountCreateParams.Capabilities.builder()
+                            .setCardPayments(
+                                AccountCreateParams.Capabilities.CardPayments.builder().setRequested(true).build()
+                            )
+                            .setTransfers(
+                                AccountCreateParams.Capabilities.Transfers.builder().setRequested(true).build()
+                            )
+                            .build()
+                    )
+                    .setBusinessProfile(
+                        AccountCreateParams.BusinessProfile.builder()
+                            .setMcc("7399")
+                            .setProductDescription("Personal tipping and service payments")
+                            .build()
+                    )
+                    .setMetadata(mapOf(
+                        "user_id"      to user.id.toString(),
+                        "email"        to user.email,
+                        "display_name" to user.displayName
+                    ))
+                    .build()
+            )
+            user.stripeAccountId  = account.id
+            user.stripeOnboarded  = false
             user.stripeLastChecked = Instant.now()
-            user.updatedAt = Instant.now()
+            user.updatedAt        = Instant.now()
             userRepository.save(user)
-            
-            logger.info("✅ Created Stripe INDIVIDUAL account ${account.id} for user ${user.id}")
-            
+            logger.info("✅ Created Stripe account ${account.id} for user ${user.id}")
             return account.id
-            
         } catch (e: StripeException) {
             logger.error("❌ Failed to create Stripe account for user ${user.id}", e)
             throw RuntimeException("Failed to create payment account: ${e.message}", e)
         }
     }
-    
-    /**
-     * Create an onboarding link for user to complete Stripe setup
-     * Links expire after 5 minutes!
-     */
+
     fun createAccountLink(stripeAccountId: String): String {
         try {
-            val returnUrl = "$baseUrl/stripe/onboarding/complete"
-            val refreshUrl = "$baseUrl/stripe/onboarding/refresh"
-            
-            val linkParams = AccountLinkCreateParams.builder()
-                .setAccount(stripeAccountId)
-                .setRefreshUrl(refreshUrl)
-                .setReturnUrl(returnUrl)
-                .setType(AccountLinkCreateParams.Type.ACCOUNT_ONBOARDING)
-                .setCollect(AccountLinkCreateParams.Collect.CURRENTLY_DUE)  // Most aggressive - only what's needed now
-                .build()
-            
-            val accountLink = AccountLink.create(linkParams)
-            
+            val link = AccountLink.create(
+                AccountLinkCreateParams.builder()
+                    .setAccount(stripeAccountId)
+                    .setRefreshUrl("$baseUrl/stripe/onboarding/refresh")
+                    .setReturnUrl("$baseUrl/stripe/onboarding/complete")
+                    .setType(AccountLinkCreateParams.Type.ACCOUNT_ONBOARDING)
+                    .setCollect(AccountLinkCreateParams.Collect.CURRENTLY_DUE)
+                    .build()
+            )
             logger.info("✅ Created onboarding link for account $stripeAccountId")
-            logger.info("   URL: ${accountLink.url}")
-            
-            return accountLink.url
-            
+            return link.url
         } catch (e: StripeException) {
             logger.error("❌ Failed to create account link for $stripeAccountId", e)
             throw RuntimeException("Failed to create onboarding link: ${e.message}", e)
         }
     }
-    
+
     @Transactional
     fun checkAndUpdateOnboardingStatus(user: AppUser): Boolean {
         if (user.stripeAccountId == null) {
             logger.warn("⚠️ User ${user.id} has no Stripe account ID")
             return false
         }
-        
-        try {
-            logger.info("🔍 Retrieving Stripe account: ${user.stripeAccountId}")
-            val account = Account.retrieve(user.stripeAccountId)
-            
-            // Log detailed account status
-            logger.info("📊 Stripe Account Status:")
-            logger.info("   - chargesEnabled: ${account.chargesEnabled}")
-            logger.info("   - payoutsEnabled: ${account.payoutsEnabled}")
-            logger.info("   - detailsSubmitted: ${account.detailsSubmitted}")
-            logger.info("   - requirements: ${account.requirements}")
-            
-            if (account.requirements != null) {
-                logger.info("   - currently_due: ${account.requirements.currentlyDue}")
-                logger.info("   - eventually_due: ${account.requirements.eventuallyDue}")
-                logger.info("   - past_due: ${account.requirements.pastDue}")
-            }
-            
-            // Check if onboarded (both charges AND payouts must be enabled)
+        return try {
+            val account     = Account.retrieve(user.stripeAccountId)
             val isOnboarded = account.chargesEnabled && account.payoutsEnabled
-            
-            logger.info("✅ Onboarding status: $isOnboarded")
-            
-            // Always update onboarding flag and timestamps
-            user.stripeOnboarded = isOnboarded
-            user.stripeLastChecked = Instant.now()
-            user.updatedAt = Instant.now()
 
-            // Always sync bank info from Stripe when onboarded —
-            // covers both first-time onboarding AND edits to an existing bank account
+            user.stripeOnboarded  = isOnboarded
+            user.stripeLastChecked = Instant.now()
+            user.updatedAt        = Instant.now()
+
             if (isOnboarded && account.externalAccounts != null) {
-                logger.info("💳 Checking for bank account info...")
-                val bankAccount = account.externalAccounts.data
+                account.externalAccounts.data
                     .filterIsInstance<BankAccount>()
                     .firstOrNull()
-
-                if (bankAccount != null) {
-                    user.bankLast4 = bankAccount.last4
-                    user.bankName  = bankAccount.bankName
-                    logger.info("   - Bank: ${bankAccount.bankName} ****${bankAccount.last4}")
-                } else {
-                    logger.warn("   - No bank account found in external accounts")
-                }
+                    ?.let { bank ->
+                        user.bankLast4 = bank.last4
+                        user.bankName  = bank.bankName
+                    }
             }
-
             userRepository.save(user)
-            logger.info("💾 User ${user.id} bank info synced — onboarded=$isOnboarded, last4=${user.bankLast4}, bank=${user.bankName}")
-
-            return isOnboarded
-            
+            logger.info("✅ Onboarding status for ${user.id}: $isOnboarded")
+            isOnboarded
         } catch (e: StripeException) {
             logger.error("❌ Failed to check onboarding status for ${user.stripeAccountId}", e)
-            return false
+            false
         }
     }
-    
-    // ==================== SENDER METHODS (NEW) ====================
-    
-    /**
-     * Get or create a Stripe Customer for a user (for sending tips)
-     * Customers can save payment methods for reuse
-     */
+
+    // ── Sender / customer ────────────────────────────────────────────────────
+
     @Transactional
     fun getOrCreateCustomer(user: AppUser): String {
-        // Return existing customer if already created
-        if (user.stripeCustomerId != null) {
-            logger.info("User ${user.id} already has Stripe customer: ${user.stripeCustomerId}")
-            return user.stripeCustomerId!!
-        }
-        
+        if (user.stripeCustomerId != null) return user.stripeCustomerId!!
         try {
-            val params = CustomerCreateParams.builder()
-                .setEmail(user.email)
-                .setName(user.displayName)
-                .putMetadata("user_id", user.id.toString())
-                .build()
-            
-            val customer = Customer.create(params)
-            
-            // Save customer ID to user
+            val customer = Customer.create(
+                CustomerCreateParams.builder()
+                    .setEmail(user.email)
+                    .setName(user.displayName)
+                    .putMetadata("user_id", user.id.toString())
+                    .build()
+            )
             user.stripeCustomerId = customer.id
-            user.updatedAt = Instant.now()
+            user.updatedAt        = Instant.now()
             userRepository.save(user)
-            
             logger.info("✅ Created Stripe customer ${customer.id} for user ${user.id}")
-            
             return customer.id
-            
         } catch (e: StripeException) {
             logger.error("❌ Failed to create Stripe customer for user ${user.id}", e)
             throw RuntimeException("Failed to create customer: ${e.message}", e)
         }
     }
-    
-    /**
-     * Create a SetupIntent for saving a payment method
-     * This is used when user first adds their card
-     */
+
     fun createSetupIntent(customerId: String): SetupIntent {
         try {
-            val params = SetupIntentCreateParams.builder()
-                .setCustomer(customerId)
-                .setAutomaticPaymentMethods(
-                    SetupIntentCreateParams.AutomaticPaymentMethods.builder()
-                        .setEnabled(true)
-                        .build()
-                )
-                .build()
-            
-            val setupIntent = SetupIntent.create(params)
-            
-            logger.info("✅ Created setup intent ${setupIntent.id} for customer $customerId")
-            
-            return setupIntent
-            
+            return SetupIntent.create(
+                SetupIntentCreateParams.builder()
+                    .setCustomer(customerId)
+                    .setAutomaticPaymentMethods(
+                        SetupIntentCreateParams.AutomaticPaymentMethods.builder().setEnabled(true).build()
+                    )
+                    .build()
+            )
         } catch (e: StripeException) {
             logger.error("❌ Failed to create setup intent for customer $customerId", e)
             throw RuntimeException("Failed to create setup intent: ${e.message}", e)
         }
     }
-    
-    /**
-     * List saved payment methods for a customer
-     */
+
     fun listPaymentMethods(customerId: String): List<PaymentMethod> {
         try {
-            val params = PaymentMethodListParams.builder()
-                .setCustomer(customerId)
-                .setType(PaymentMethodListParams.Type.CARD)
-                .build()
-            
-            val methods = PaymentMethod.list(params).data
-            
-            logger.info("📋 Listed ${methods.size} payment methods for customer $customerId")
-            
-            return methods
-            
+            return PaymentMethod.list(
+                PaymentMethodListParams.builder()
+                    .setCustomer(customerId)
+                    .setType(PaymentMethodListParams.Type.CARD)
+                    .build()
+            ).data
         } catch (e: StripeException) {
             logger.error("❌ Failed to list payment methods for customer $customerId", e)
             throw RuntimeException("Failed to list payment methods: ${e.message}", e)
         }
     }
-    
-    /**
-     * Attach a payment method to a customer and set as default
-     */
+
     @Transactional
     fun attachPaymentMethod(paymentMethodId: String, customerId: String, user: AppUser): PaymentMethod {
         try {
-            logger.info("📎 Attaching payment method $paymentMethodId to customer $customerId")
-            
-            // Attach to customer
             val paymentMethod = PaymentMethod.retrieve(paymentMethodId)
-            val attachParams = PaymentMethodAttachParams.builder()
-                .setCustomer(customerId)
-                .build()
-            paymentMethod.attach(attachParams)
-            
-            logger.info("✅ Payment method attached")
-            
-            // Set as default payment method on customer
-            val updateParams = CustomerUpdateParams.builder()
-                .setInvoiceSettings(
-                    CustomerUpdateParams.InvoiceSettings.builder()
-                        .setDefaultPaymentMethod(paymentMethodId)
-                        .build()
-                )
-                .build()
-            Customer.retrieve(customerId).update(updateParams)
-            
-            logger.info("✅ Set as default payment method on customer")
-            
-            // Save to user record
+            paymentMethod.attach(PaymentMethodAttachParams.builder().setCustomer(customerId).build())
+
+            Customer.retrieve(customerId).update(
+                CustomerUpdateParams.builder()
+                    .setInvoiceSettings(
+                        CustomerUpdateParams.InvoiceSettings.builder()
+                            .setDefaultPaymentMethod(paymentMethodId)
+                            .build()
+                    )
+                    .build()
+            )
+
             user.defaultPaymentMethodId = paymentMethodId
-            user.updatedAt = Instant.now()
+            user.updatedAt              = Instant.now()
             userRepository.save(user)
-            
-            logger.info("✅ Saved default payment method to user ${user.id}")
-            
+            logger.info("✅ Attached + set default payment method $paymentMethodId for user ${user.id}")
             return paymentMethod
-            
         } catch (e: StripeException) {
             logger.error("❌ Failed to attach payment method $paymentMethodId", e)
             throw RuntimeException("Failed to attach payment method: ${e.message}", e)
         }
     }
-    
-    /**
-     * Detach (remove) a payment method from customer
-     */
+
     fun detachPaymentMethod(paymentMethodId: String) {
         try {
-            logger.info("🗑️ Detaching payment method $paymentMethodId")
-            
-            val paymentMethod = PaymentMethod.retrieve(paymentMethodId)
-            paymentMethod.detach()
-            
-            logger.info("✅ Payment method detached")
-            
+            PaymentMethod.retrieve(paymentMethodId).detach()
         } catch (e: StripeException) {
             logger.error("❌ Failed to detach payment method $paymentMethodId", e)
             throw RuntimeException("Failed to detach payment method: ${e.message}", e)
         }
     }
-    private fun toCents(amount: BigDecimal): Long {
-        // Force 2dp then convert to cents exactly
-        val normalized = amount.setScale(2, RoundingMode.HALF_UP)
-        return normalized.movePointRight(2).longValueExact()
-    }
-    
+
+    // ── Fee calculation ──────────────────────────────────────────────────────
+
     /**
-     * Calculate fee breakdown for transparency
-     * Returns detailed breakdown of all fees and what receiver actually gets
+     * FIX — Merged duplicate fee methods:
+     *   computeApplicationFeeCents() was a private re-implementation of the
+     *   same math in calculateFeeBreakdown(), duplicated because the PaymentIntent
+     *   path needed a Long (cents) and the controller path needed a FeeBreakdown.
+     *   Now there is one method. createPaymentIntentWithSavedMethod() calls
+     *   calculateFeeBreakdown() and reads .totalFeeCents directly — no duplicate
+     *   logic, no risk of the two drifting apart if fee rates change.
      */
     fun calculateFeeBreakdown(amount: BigDecimal): FeeBreakdown {
         val amountCents = toCents(amount)
-        
-        // Stripe processing fee (2.9% + $0.30)
+
         val stripePercentCents = BigDecimal(amountCents)
             .multiply(processingFeePercent)
             .divide(BigDecimal("100"), 10, RoundingMode.HALF_UP)
             .setScale(0, RoundingMode.CEILING)
             .longValueExact()
         val stripeFeeCents = stripePercentCents + processingFeeFixedCents
-        
-        // Platform fee (3%)
+
         val platformPercentCents = BigDecimal(amountCents)
             .multiply(platformFeePercent)
             .divide(BigDecimal("100"), 10, RoundingMode.HALF_UP)
             .setScale(0, RoundingMode.CEILING)
             .longValueExact()
         val platformFeeCents = platformPercentCents + platformFeeFixedCents
-        
-        // Total application fee (what we charge)
-        val totalAppFeeCents = stripeFeeCents + platformFeeCents
-        
-        // What receiver gets
-        val receiverNetCents = amountCents - totalAppFeeCents
-        
+
+        val totalAppFeeCents  = stripeFeeCents + platformFeeCents
+        val receiverNetCents  = amountCents - totalAppFeeCents
+
         return FeeBreakdown(
-            senderPaysCents = amountCents,
-            stripeFeeCents = stripeFeeCents,
-            platformFeeCents = platformFeeCents,
-            totalFeeCents = totalAppFeeCents,
+            senderPaysCents   = amountCents,
+            stripeFeeCents    = stripeFeeCents,
+            platformFeeCents  = platformFeeCents,
+            totalFeeCents     = totalAppFeeCents,
             receiverGetsCents = receiverNetCents,
-            senderPays = BigDecimal(amountCents).divide(BigDecimal(100), 2, RoundingMode.HALF_UP),
-            stripeFee = BigDecimal(stripeFeeCents).divide(BigDecimal(100), 2, RoundingMode.HALF_UP),
-            platformFee = BigDecimal(platformFeeCents).divide(BigDecimal(100), 2, RoundingMode.HALF_UP),
-            totalFee = BigDecimal(totalAppFeeCents).divide(BigDecimal(100), 2, RoundingMode.HALF_UP),
-            receiverGets = BigDecimal(receiverNetCents).divide(BigDecimal(100), 2, RoundingMode.HALF_UP)
+            senderPays        = cents(amountCents),
+            stripeFee         = cents(stripeFeeCents),
+            platformFee       = cents(platformFeeCents),
+            totalFee          = cents(totalAppFeeCents),
+            receiverGets      = cents(receiverNetCents)
         )
     }
-    /**
-     * Application fee is how we make the receiver "pay":
-     * Receiver receives (amount - applicationFee).
-     *
-     * For destination charges, Stripe deducts processing fees from the platform.
-     * By setting application_fee_amount ~= processing fee, platform breaks even.
-     */
-    private fun computeApplicationFeeCents(amountCents: Long): Long {
-        // percent portion in cents: ceil(amountCents * (percent/100))
-        val percentFeeCents = BigDecimal(amountCents)
-            .multiply(processingFeePercent)
-            .divide(BigDecimal("100"), 10, RoundingMode.HALF_UP)
-            .setScale(0, RoundingMode.CEILING)
-            .longValueExact()
 
-        val processingFeeCents = percentFeeCents + processingFeeFixedCents
+    // ── Payment intent ───────────────────────────────────────────────────────
 
-        // Optional platform margin (usually 0 for break-even)
-        val platformPercentCents = BigDecimal(amountCents)
-            .multiply(platformFeePercent)
-            .divide(BigDecimal("100"), 10, RoundingMode.HALF_UP)
-            .setScale(0, RoundingMode.CEILING)
-            .longValueExact()
-
-        return processingFeeCents + platformPercentCents + platformFeeFixedCents
-    }
-    
-    /**
-     * Create PaymentIntent using saved payment method
-     * This is the fast path for tips with saved cards - auto-confirms!
-     * 
-     * FIXED: Added customer parameter (required when using saved payment method)
-     */
     fun createPaymentIntentWithSavedMethod(
         amount: BigDecimal,
         receiverStripeAccountId: String,
@@ -453,76 +294,63 @@ class StripePaymentService(
         senderCustomerId: String
     ): PaymentIntent {
         try {
-            val amountInCents = toCents(amount)
+            val breakdown = calculateFeeBreakdown(amount)   // single source of truth
+            val amountCents          = breakdown.senderPaysCents
+            val applicationFeeCents  = breakdown.totalFeeCents
 
-            if (amountInCents < minimumChargeCents) {
-                throw IllegalArgumentException("Tip is below minimum charge: ${minimumChargeCents} cents")
-            }
+            if (amountCents < minimumChargeCents)
+                throw IllegalArgumentException("Tip is below minimum charge: $minimumChargeCents cents")
+            if (applicationFeeCents >= amountCents)
+                throw IllegalArgumentException("Computed fee ($applicationFeeCents) must be less than amount ($amountCents)")
 
-            val applicationFeeCents = computeApplicationFeeCents(amountInCents)
-
-            // Prevent pathological cases where fee >= amount
-            if (applicationFeeCents >= amountInCents) {
-                throw IllegalArgumentException(
-                    "Computed fee ($applicationFeeCents) must be less than amount ($amountInCents)."
-                )
-            }
-
-            val receiverNetCents = amountInCents - applicationFeeCents
-
-            val params = PaymentIntentCreateParams.builder()
-                .setAmount(amountInCents)                // Sender pays EXACTLY the tip amount
-                .setCurrency("usd")
-                .setCustomer(senderCustomerId)
-                .setPaymentMethod(paymentMethodId)
-                .setConfirm(true)
-                .setOffSession(true)
-
-                // Key line: makes receiver get net (amount - app_fee)
-                .setApplicationFeeAmount(applicationFeeCents)
-
-                // Destination charge: routes funds to receiver
-                .setTransferData(
-                    PaymentIntentCreateParams.TransferData.builder()
-                        .setDestination(receiverStripeAccountId)
-                        .build()
-                )
-                .putMetadata("sender_id", senderId.toString())
-                .putMetadata("receiver_id", receiverId.toString())
-                .putMetadata("tip_nonce", tipNonce)
-                .putMetadata("gross_cents", amountInCents.toString())
-                .putMetadata("app_fee_cents", applicationFeeCents.toString())
-                .putMetadata("receiver_net_cents", receiverNetCents.toString())
-                .build()
-
-            val paymentIntent = PaymentIntent.create(params)
-
-            logger.info("✅ PaymentIntent: ${paymentIntent.id} status=${paymentIntent.status} amount=${paymentIntent.amount}")
+            val paymentIntent = PaymentIntent.create(
+                PaymentIntentCreateParams.builder()
+                    .setAmount(amountCents)
+                    .setCurrency("usd")
+                    .setCustomer(senderCustomerId)
+                    .setPaymentMethod(paymentMethodId)
+                    .setConfirm(true)
+                    .setOffSession(true)
+                    .setApplicationFeeAmount(applicationFeeCents)
+                    .setTransferData(
+                        PaymentIntentCreateParams.TransferData.builder()
+                            .setDestination(receiverStripeAccountId)
+                            .build()
+                    )
+                    .putMetadata("sender_id",         senderId.toString())
+                    .putMetadata("receiver_id",       receiverId.toString())
+                    .putMetadata("tip_nonce",         tipNonce)
+                    .putMetadata("gross_cents",       amountCents.toString())
+                    .putMetadata("app_fee_cents",     applicationFeeCents.toString())
+                    .putMetadata("receiver_net_cents", breakdown.receiverGetsCents.toString())
+                    .build()
+            )
+            logger.info("✅ PaymentIntent ${paymentIntent.id} status=${paymentIntent.status}")
             return paymentIntent
-
         } catch (e: StripeException) {
-            logger.error("❌ Failed to create payment intent: ${e.message}", e)
+            logger.error("❌ Failed to create PaymentIntent: ${e.message}", e)
             throw RuntimeException("Failed to create payment intent: ${e.message}", e)
         }
     }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private fun toCents(amount: BigDecimal): Long =
+        amount.setScale(2, RoundingMode.HALF_UP).movePointRight(2).longValueExact()
+
+    private fun cents(c: Long): BigDecimal =
+        BigDecimal(c).divide(BigDecimal(100), 2, RoundingMode.HALF_UP)
 }
 
-/**
- * Fee breakdown for transparency
- * All amounts in both cents and dollars
- */
 data class FeeBreakdown(
-    // Cents (for exact calculations)
-    val senderPaysCents: Long,       // What sender pays (original amount)
-    val stripeFeeCents: Long,        // Stripe processing fee (2.9% + $0.30)
-    val platformFeeCents: Long,      // TapTapTips platform fee (3%)
-    val totalFeeCents: Long,         // Total fees deducted
-    val receiverGetsCents: Long,     // What receiver actually receives
-    
-    // Dollars (for display)
-    val senderPays: BigDecimal,      // What sender pays (original amount)
-    val stripeFee: BigDecimal,       // Stripe processing fee
-    val platformFee: BigDecimal,     // TapTapTips platform fee
-    val totalFee: BigDecimal,        // Total fees deducted
-    val receiverGets: BigDecimal     // What receiver actually receives
+    val senderPaysCents: Long,
+    val stripeFeeCents: Long,
+    val platformFeeCents: Long,
+    val totalFeeCents: Long,
+    val receiverGetsCents: Long,
+    val senderPays: BigDecimal,
+    val stripeFee: BigDecimal,
+    val platformFee: BigDecimal,
+    val totalFee: BigDecimal,
+    val receiverGets: BigDecimal
 )
