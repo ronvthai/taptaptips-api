@@ -7,6 +7,8 @@ import com.taptaptips.server.service.TipSecurityService
 import com.taptaptips.server.service.TipSecurityService.AlreadyProcessed
 import com.taptaptips.server.service.NotificationService
 import org.springframework.dao.DataIntegrityViolationException
+import org.springframework.data.domain.PageRequest
+import org.springframework.data.domain.Sort
 import org.springframework.security.core.context.SecurityContextHolder
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.web.bind.annotation.*
@@ -25,6 +27,11 @@ class TipController(
     private val stripeService: com.taptaptips.server.service.StripePaymentService,
     private val notificationService: NotificationService
 ) {
+    companion object {
+        private const val DEFAULT_PAGE_SIZE = 50
+        private const val MAX_PAGE_SIZE = 200
+    }
+
     private fun authUserId(): UUID =
         UUID.fromString(SecurityContextHolder.getContext().authentication.name)
 
@@ -62,13 +69,12 @@ class TipController(
                 )
             )
 
-            // Notify receiver immediately — webhook notification is a secondary fallback
             notificationService.notifyTipReceived(
-                receiverId = receiver.id!!,
-                senderId   = sender.id!!,
-                senderName = sender.displayName,
+                receiverId  = receiver.id!!,
+                senderId    = sender.id!!,
+                senderName  = sender.displayName,
                 amountCents = (feeBreakdown.receiverGets * java.math.BigDecimal(100)).toLong(),
-                tipId      = tip.id!!
+                tipId       = tip.id!!
             )
 
             TipResult("CONFIRMED")
@@ -80,80 +86,120 @@ class TipController(
     /**
      * GET /tips/received
      *
-     * Query params (mutually exclusive priority):
+     * Query params:
      *   startDate + endDate  → inclusive range (ISO dates: yyyy-MM-dd)
-     *   date                 → single day (ISO date: yyyy-MM-dd), defaults to today
+     *   date                 → single day, defaults to today
+     *   page                 → 0-based page index (default 0)
+     *   size                 → page size, capped at MAX_PAGE_SIZE (default 50)
+     *
+     * FIX: uses FETCH JOIN queries — sender/receiver loaded in the same SQL
+     * statement as the tips. No N+1 lazy loads, no unbounded result sets.
      */
     @GetMapping("/received")
     fun getReceivedTips(
         @RequestParam(required = false) date: String?,
         @RequestParam(required = false) startDate: String?,
-        @RequestParam(required = false) endDate: String?
-    ): List<TipSummaryDto> {
-        val receiverId: UUID = authUserId()
+        @RequestParam(required = false) endDate: String?,
+        @RequestParam(defaultValue = "0") page: Int,
+        @RequestParam(defaultValue = "$DEFAULT_PAGE_SIZE") size: Int
+    ): TipPageResult {
+        val receiverId = authUserId()
+        val pageable = PageRequest.of(page, size.coerceAtMost(MAX_PAGE_SIZE), Sort.by("createdAt").descending())
 
-        val receivedTips: List<Tip> = when {
-            startDate != null && endDate != null -> {
-                val start = LocalDate.parse(startDate)
-                val end   = LocalDate.parse(endDate)
-                tips.findByReceiver_IdAndCreatedAtLocalBetween(receiverId, start, end)
-            }
-            else -> {
-                val targetDate = date?.let { LocalDate.parse(it) } ?: LocalDate.now()
-                tips.findByReceiver_IdAndCreatedAtLocal(receiverId, targetDate)
-            }
+        val tipPage = when {
+            startDate != null && endDate != null ->
+                tips.findByReceiver_IdAndCreatedAtLocalBetween(
+                    receiverId,
+                    LocalDate.parse(startDate),
+                    LocalDate.parse(endDate),
+                    pageable
+                )
+            else ->
+                tips.findByReceiver_IdAndCreatedAtLocal(
+                    receiverId,
+                    date?.let { LocalDate.parse(it) } ?: LocalDate.now(),
+                    pageable
+                )
         }
 
-        return receivedTips.map { tip: Tip ->
-            TipSummaryDto(
-                id = tip.id.toString(),
-                senderId = tip.sender?.id?.toString() ?: "",
-                senderName = tip.sender?.displayName ?: "Unknown",
-                amount = tip.amount,
-                netAmount = tip.netAmount,
-                totalFees = tip.totalFees,
-                platformFee = tip.platformFee,
-                createdAt = tip.createdAt.toString(),
-                createdAtLocal = tip.createdAtLocal.toString(),
-                timezone = tip.timezone
-            )
-        }
+        return TipPageResult(
+            tips = tipPage.content.map { it.toReceivedDto() },
+            totalElements = tipPage.totalElements,
+            totalPages = tipPage.totalPages,
+            page = page,
+            size = tipPage.numberOfElements
+        )
     }
 
+    /**
+     * GET /tips/sent
+     *
+     * FIX: same FETCH JOIN + pagination treatment as /received.
+     */
     @GetMapping("/sent")
     fun getSentTips(
         @RequestParam(required = false) startDate: String?,
-        @RequestParam(required = false) endDate: String?
-    ): List<SentTipSummaryDto> {
-        val senderId: UUID = authUserId()
+        @RequestParam(required = false) endDate: String?,
+        @RequestParam(defaultValue = "0") page: Int,
+        @RequestParam(defaultValue = "$DEFAULT_PAGE_SIZE") size: Int
+    ): TipPageResult {
+        val senderId = authUserId()
+        val pageable = PageRequest.of(page, size.coerceAtMost(MAX_PAGE_SIZE), Sort.by("createdAt").descending())
 
-        val start: LocalDate = startDate?.let { LocalDate.parse(it) }
-            ?: LocalDate.now().withDayOfMonth(1)
-        val end: LocalDate = endDate?.let { LocalDate.parse(it) }
-            ?: LocalDate.now()
+        val start = startDate?.let { LocalDate.parse(it) } ?: LocalDate.now().withDayOfMonth(1)
+        val end   = endDate?.let   { LocalDate.parse(it) } ?: LocalDate.now()
 
-        val sentTips: List<Tip> = tips.findBySender_IdAndCreatedAtLocalBetween(
-            senderId,
-            start,
-            end
+        val tipPage = tips.findBySender_IdAndCreatedAtLocalBetween(senderId, start, end, pageable)
+
+        return TipPageResult(
+            tips = tipPage.content.map { it.toSentDto() },
+            totalElements = tipPage.totalElements,
+            totalPages = tipPage.totalPages,
+            page = page,
+            size = tipPage.numberOfElements
         )
-
-        return sentTips.map { tip: Tip ->
-            SentTipSummaryDto(
-                id = tip.id.toString(),
-                recipientId = tip.receiver?.id?.toString() ?: "",
-                recipientName = tip.receiver?.displayName ?: "Unknown",
-                amount = tip.amount,
-                netAmount = tip.netAmount,
-                totalFees = tip.totalFees,
-                platformFee = tip.platformFee,
-                createdAt = tip.createdAt.toString(),
-                createdAtLocal = tip.createdAtLocal.toString(),
-                timezone = tip.timezone
-            )
-        }
     }
+
+    // ── Mapping helpers ──────────────────────────────────────────────────────
+    // Defined as extension funs so the controller stays readable and the
+    // mapping is co-located with the types it touches.
+
+    private fun Tip.toReceivedDto() = TipSummaryDto(
+        id             = id.toString(),
+        senderId       = sender?.id?.toString() ?: "",
+        senderName     = sender?.displayName    ?: "Unknown",
+        amount         = amount,
+        netAmount      = netAmount,
+        totalFees      = totalFees,
+        platformFee    = platformFee,
+        createdAt      = createdAt.toString(),
+        createdAtLocal = createdAtLocal.toString(),
+        timezone       = timezone
+    )
+
+    private fun Tip.toSentDto() = SentTipSummaryDto(
+        id            = id.toString(),
+        recipientId   = receiver?.id?.toString() ?: "",
+        recipientName = receiver?.displayName    ?: "Unknown",
+        amount        = amount,
+        netAmount     = netAmount,
+        totalFees     = totalFees,
+        platformFee   = platformFee,
+        createdAt     = createdAt.toString(),
+        createdAtLocal = createdAtLocal.toString(),
+        timezone      = timezone
+    )
 }
+
+// ── Response types ───────────────────────────────────────────────────────────
+
+data class TipPageResult(
+    val tips: List<Any>,          // TipSummaryDto or SentTipSummaryDto
+    val totalElements: Long,
+    val totalPages: Int,
+    val page: Int,
+    val size: Int
+)
 
 data class TipSummaryDto(
     val id: String,

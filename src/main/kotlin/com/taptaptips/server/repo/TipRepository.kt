@@ -1,55 +1,90 @@
 package com.taptaptips.server.repo
 
 import com.taptaptips.server.domain.Tip
+import org.springframework.data.domain.Page
+import org.springframework.data.domain.Pageable
 import org.springframework.data.jpa.repository.JpaRepository
-import java.time.Instant
-import java.time.LocalDate  // ⭐ NEW
-import java.util.*
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
+import java.time.Instant
+import java.time.LocalDate
+import java.util.*
 
 interface TipRepository : JpaRepository<Tip, UUID> {
-    // Use nested path for the relation:
+
     fun existsBySender_IdAndNonce(senderId: UUID, nonce: String): Boolean
-    
-    // ⭐ DEPRECATED: Old methods using Instant (keep for backward compatibility)
+
+    // ── DEPRECATED: Instant-based queries (kept for backward compatibility) ──
     fun findByReceiver_IdAndCreatedAtBetween(
         receiverId: UUID,
         startDate: Instant,
         endDate: Instant
     ): List<Tip>
-    
+
     fun findBySender_IdAndCreatedAtBetween(
         senderId: UUID,
         startDate: Instant,
         endDate: Instant
     ): List<Tip>
-    
-    // ⭐ NEW: Fast queries using pre-computed local date (uses index!)
-    fun findByReceiver_IdAndCreatedAtLocalBetween(
-        receiverId: UUID,
-        startDate: LocalDate,
-        endDate: LocalDate
-    ): List<Tip>
-    
-    fun findBySender_IdAndCreatedAtLocalBetween(
-        senderId: UUID,
-        startDate: LocalDate,
-        endDate: LocalDate
-    ): List<Tip>
-    
-    // ⭐ NEW: Query for single day (even faster)
-    fun findByReceiver_IdAndCreatedAtLocal(
-        receiverId: UUID,
-        date: LocalDate
-    ): List<Tip>
 
-    // Eagerly fetch sender + receiver so webhook handlers never get lazy-load nulls
+    // ── FIX: FETCH JOIN eliminates N+1 on sender/receiver display names ──
+    // Each of these issues exactly ONE SQL query regardless of result size.
+    // Previously, mapping tip.sender?.displayName in the controller triggered
+    // a separate SELECT per tip (N+1). The FETCH JOIN collapses that into a
+    // single JOIN query, and the Page<Tip> overload adds LIMIT/OFFSET so a
+    // receiver with hundreds of tips never loads them all into memory at once.
+
+    @Query("""
+        SELECT t FROM Tip t
+        LEFT JOIN FETCH t.sender
+        LEFT JOIN FETCH t.receiver
+        WHERE t.receiver.id = :receiverId
+          AND t.createdAtLocal BETWEEN :startDate AND :endDate
+        ORDER BY t.createdAt DESC
+    """)
+    fun findByReceiver_IdAndCreatedAtLocalBetween(
+        @Param("receiverId") receiverId: UUID,
+        @Param("startDate") startDate: LocalDate,
+        @Param("endDate") endDate: LocalDate,
+        pageable: Pageable
+    ): Page<Tip>
+
+    @Query("""
+        SELECT t FROM Tip t
+        LEFT JOIN FETCH t.sender
+        LEFT JOIN FETCH t.receiver
+        WHERE t.sender.id = :senderId
+          AND t.createdAtLocal BETWEEN :startDate AND :endDate
+        ORDER BY t.createdAt DESC
+    """)
+    fun findBySender_IdAndCreatedAtLocalBetween(
+        @Param("senderId") senderId: UUID,
+        @Param("startDate") startDate: LocalDate,
+        @Param("endDate") endDate: LocalDate,
+        pageable: Pageable
+    ): Page<Tip>
+
+    @Query("""
+        SELECT t FROM Tip t
+        LEFT JOIN FETCH t.sender
+        LEFT JOIN FETCH t.receiver
+        WHERE t.receiver.id = :receiverId
+          AND t.createdAtLocal = :date
+        ORDER BY t.createdAt DESC
+    """)
+    fun findByReceiver_IdAndCreatedAtLocal(
+        @Param("receiverId") receiverId: UUID,
+        @Param("date") date: LocalDate,
+        pageable: Pageable
+    ): Page<Tip>
+
+    // ── Webhook lookups: FETCH JOIN already present, keep as-is ──
     @Query("SELECT t FROM Tip t LEFT JOIN FETCH t.sender LEFT JOIN FETCH t.receiver WHERE t.paymentIntentId = :id")
     fun findByPaymentIntentId(@Param("id") id: String): Tip?
 
     @Query("SELECT t FROM Tip t LEFT JOIN FETCH t.sender LEFT JOIN FETCH t.receiver WHERE t.chargeId = :id")
     fun findByChargeId(@Param("id") id: String): Tip?
+
     fun findByNonce(nonce: String): Tip?
     fun countBySender_Id(senderId: UUID): Long
 
