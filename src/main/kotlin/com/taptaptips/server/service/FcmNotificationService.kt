@@ -4,70 +4,67 @@ import com.google.firebase.messaging.*
 import com.taptaptips.server.repo.FcmTokenRepository
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.Instant
 import java.util.UUID
 
-/**
- * Firebase Cloud Messaging service for push notifications.
- * ⭐ UPDATED: Now uses cents to preserve decimal precision
- */
 @Service
 class FcmNotificationService(
     private val fcmTokenRepository: FcmTokenRepository
 ) {
     private val logger = LoggerFactory.getLogger(FcmNotificationService::class.java)
-    
+
     /**
      * Send tip notification via FCM to all user's active devices.
-     * 
-     * ⭐ UPDATED: Uses amountCents (e.g., 911 for $9.11) to preserve cents
+     *
+     * FIX: @Transactional added so that fcmTokenRepository.deactivateToken()
+     * (a @Modifying query) has a transaction context when called on invalid tokens.
+     * Without this, Hibernate throws TransactionRequiredException every time a
+     * stale token is deactivated during webhook processing.
      */
+    @Transactional
     fun sendTipNotification(
         receiverId: UUID,
         senderId: UUID,
         senderName: String,
-        amountCents: Long,  // ⭐ CHANGED: Was Int amount, now Long amountCents
+        amountCents: Long,
         tipId: UUID
     ): Boolean {
         val tokens = fcmTokenRepository.findByUser_IdAndIsActiveTrue(receiverId)
-        
+
         if (tokens.isEmpty()) {
             logger.info("📭 No FCM tokens for user $receiverId")
             return false
         }
-        
-        // ⭐ NEW: Convert cents to dollars with proper formatting
+
         val amountDollars = BigDecimal(amountCents)
             .divide(BigDecimal(100), 2, RoundingMode.HALF_UP)
-            .toPlainString()  // "9.11"
-        
+            .toPlainString()
+
         logger.info("📤 Sending FCM notification to ${tokens.size} device(s) for user $receiverId")
-        
+
         var successCount = 0
         var failureCount = 0
-        
+
         tokens.forEach { fcmToken ->
             try {
-                // Build notification message
                 val message = Message.builder()
                     .setToken(fcmToken.token)
                     .setNotification(
                         Notification.builder()
                             .setTitle("💰 Tip Received!")
-                            .setBody("$$amountDollars from $senderName")  // ⭐ CHANGED: Now shows cents
+                            .setBody("$$amountDollars from $senderName")
                             .build()
                     )
-                    // Data payload for app to handle
-                    .putData("type", "tip_received")
-                    .putData("tipId", tipId.toString())
-                    .putData("senderId", senderId.toString())
-                    .putData("senderName", senderName)
-                    .putData("amount", amountDollars)               // ⭐ CHANGED: String "9.11"
-                    .putData("amount_cents", amountCents.toString()) // ⭐ NEW: Also send cents
-                    .putData("timestamp", System.currentTimeMillis().toString())
-                    // Android-specific config
+                    .putData("type",         "tip_received")
+                    .putData("tipId",        tipId.toString())
+                    .putData("senderId",     senderId.toString())
+                    .putData("senderName",   senderName)
+                    .putData("amount",       amountDollars)
+                    .putData("amount_cents", amountCents.toString())
+                    .putData("timestamp",    System.currentTimeMillis().toString())
                     .setAndroidConfig(
                         AndroidConfig.builder()
                             .setPriority(AndroidConfig.Priority.HIGH)
@@ -79,7 +76,6 @@ class FcmNotificationService(
                             )
                             .build()
                     )
-                    // iOS-specific config
                     .setApnsConfig(
                         ApnsConfig.builder()
                             .setAps(
@@ -91,25 +87,20 @@ class FcmNotificationService(
                             .build()
                     )
                     .build()
-                
-                // Send via FCM
+
                 val response = FirebaseMessaging.getInstance().send(message)
-                
-                // Update last used timestamp
+
                 fcmToken.lastUsed = Instant.now()
                 fcmTokenRepository.save(fcmToken)
-                
+
                 successCount++
                 logger.info("✅ FCM sent to ${fcmToken.platform} device: $response")
-                
+
             } catch (e: FirebaseMessagingException) {
                 failureCount++
-                
-                // Handle token errors
                 when (e.messagingErrorCode) {
                     MessagingErrorCode.INVALID_ARGUMENT,
                     MessagingErrorCode.UNREGISTERED -> {
-                        // Token is invalid or device uninstalled app
                         logger.warn("⚠️ Invalid FCM token, deactivating: ${e.message}")
                         fcmTokenRepository.deactivateToken(fcmToken.token)
                     }
@@ -122,22 +113,17 @@ class FcmNotificationService(
                 logger.error("❌ Unexpected error sending FCM", e)
             }
         }
-        
+
         logger.info("📊 FCM results: $successCount success, $failureCount failed")
         return successCount > 0
     }
-    
-    /**
-     * Send a test notification (useful for debugging)
-     */
+
     fun sendTestNotification(userId: UUID, message: String): Boolean {
         val tokens = fcmTokenRepository.findByUser_IdAndIsActiveTrue(userId)
-        
         if (tokens.isEmpty()) {
             logger.warn("No FCM tokens for user $userId")
             return false
         }
-        
         return try {
             val fcmMessage = Message.builder()
                 .setToken(tokens.first().token)
@@ -148,7 +134,6 @@ class FcmNotificationService(
                         .build()
                 )
                 .build()
-            
             FirebaseMessaging.getInstance().send(fcmMessage)
             logger.info("✅ Test notification sent")
             true
