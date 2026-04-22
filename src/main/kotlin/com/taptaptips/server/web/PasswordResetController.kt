@@ -12,21 +12,21 @@ class PasswordResetController(
     private val passwordResetService: PasswordResetService
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
-    
+
     data class ForgotPasswordRequest(val email: String)
     data class ResetPasswordRequest(val token: String, val newPassword: String)
     data class ValidateTokenRequest(val token: String)
-    
+
     data class ErrorResponse(
         val error: String,
         val message: String? = null,
         val timestamp: Long = System.currentTimeMillis()
     )
-    
+
     @PostMapping("/forgot")
     fun forgotPassword(@RequestBody request: ForgotPasswordRequest): ResponseEntity<Any> {
         logger.info("🔐 Password reset requested for: ${request.email}")
-        
+
         // Validate email format
         if (!isValidEmail(request.email)) {
             logger.warn("❌ Password reset failed: Invalid email format - ${request.email}")
@@ -37,14 +37,14 @@ class PasswordResetController(
                     message = "Please enter a valid email address"
                 ))
         }
-        
+
         try {
             // Initiate password reset
             // Note: We don't reveal whether the email exists or not for security
             passwordResetService.initiatePasswordReset(request.email)
-            
+
             logger.info("✅ Password reset email sent (if account exists)")
-            
+
             return ResponseEntity.ok(mapOf(
                 "message" to "If an account exists with this email, a password reset link has been sent.",
                 "success" to true,
@@ -60,11 +60,11 @@ class PasswordResetController(
                 ))
         }
     }
-    
+
     @PostMapping("/validate-token")
     fun validateToken(@RequestBody request: ValidateTokenRequest): ResponseEntity<Any> {
         logger.info("🔍 Validating reset token: ${request.token.take(8)}...")
-        
+
         // Validate token format
         if (request.token.isBlank() || request.token.length < 32) {
             logger.warn("❌ Token validation failed: Invalid token format")
@@ -75,10 +75,10 @@ class PasswordResetController(
                     "error" to "Invalid reset link format. Please request a new one."
                 ))
         }
-        
+
         try {
             val resetToken = passwordResetService.validateToken(request.token)
-            
+
             return if (resetToken != null) {
                 logger.info("✅ Token validated successfully for user: ${resetToken.user.email}")
                 ResponseEntity.ok(mapOf(
@@ -105,37 +105,52 @@ class PasswordResetController(
                 ))
         }
     }
-    
+
+    /**
+     * Reset the user's password using a valid reset token.
+     *
+     * Status codes:
+     *   200 → password updated
+     *   400 → invalid or expired reset token (link problem)
+     *   422 → new password failed validation (user needs to pick a different one)
+     *   500 → unexpected server error
+     *
+     * 422 is used for validation failures (too short, too common) so clients
+     * can distinguish "the link is dead, start over" from "try a stronger
+     * password on this same screen."
+     */
     @PostMapping("/reset")
     fun resetPassword(@RequestBody request: ResetPasswordRequest): ResponseEntity<Any> {
         logger.info("🔐 Password reset attempt with token: ${request.token.take(8)}...")
-        
-        // Validate password strength
+
+        // Length check
         if (request.newPassword.length < 8) {
             logger.warn("❌ Password reset failed: Password too short")
             return ResponseEntity
-                .status(HttpStatus.BAD_REQUEST)
+                .status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(mapOf(
                     "success" to false,
-                    "error" to "Password must be at least 8 characters long"
+                    "error" to "Password must be at least 8 characters long."
                 ))
         }
-        
-        // Check for common weak passwords
-        val weakPasswords = listOf("password", "12345678", "qwerty123", "password123")
-        if (weakPasswords.any { it.equals(request.newPassword, ignoreCase = true) }) {
+
+        // Common-password check
+        val weakPasswords = setOf(
+            "password", "12345678", "qwerty123", "password123"
+        )
+        if (request.newPassword.lowercase() in weakPasswords) {
             logger.warn("❌ Password reset failed: Weak password detected")
             return ResponseEntity
-                .status(HttpStatus.BAD_REQUEST)
+                .status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(mapOf(
                     "success" to false,
-                    "error" to "Please choose a stronger password"
+                    "error" to "That password is too common. Please choose something harder to guess."
                 ))
         }
-        
+
         try {
             val success = passwordResetService.resetPassword(request.token, request.newPassword)
-            
+
             return if (success) {
                 logger.info("✅ Password reset successful")
                 ResponseEntity.ok(mapOf(
@@ -169,7 +184,7 @@ class PasswordResetController(
                 ))
         }
     }
-    
+
     /**
      * Validate email format using regex
      */
