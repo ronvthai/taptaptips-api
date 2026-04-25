@@ -89,7 +89,7 @@ class BleTokenController(
             )
         } while (tokenToUser.containsKey(token))
 
-        val ttlMs = TimeUnit.MINUTES.toMillis(30)
+        val ttlMs = TimeUnit.HOURS.toMillis(6)
         tokenToUser[token] = TokenEntry(userId, System.currentTimeMillis() + ttlMs)
 
         // Remove old token for this user if any
