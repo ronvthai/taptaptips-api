@@ -237,17 +237,46 @@ class StripePaymentService(
         }
     }
 
-    // ── Fee calculation ──────────────────────────────────────────────────────
+    // ── Account deletion helpers ─────────────────────────────────────────────
 
     /**
-     * FIX — Merged duplicate fee methods:
-     *   computeApplicationFeeCents() was a private re-implementation of the
-     *   same math in calculateFeeBreakdown(), duplicated because the PaymentIntent
-     *   path needed a Long (cents) and the controller path needed a FeeBreakdown.
-     *   Now there is one method. createPaymentIntentWithSavedMethod() calls
-     *   calculateFeeBreakdown() and reads .totalFeeCents directly — no duplicate
-     *   logic, no risk of the two drifting apart if fee rates change.
+     * Deletes a Stripe Customer object, which automatically detaches all
+     * saved payment methods.  Called during account deletion.
+     *
+     * Throws RuntimeException if Stripe rejects the deletion (e.g. open
+     * invoices). The caller (UserController.deleteAccount) catches and logs
+     * but does not abort the deletion flow.
      */
+    fun deleteCustomer(customerId: String) {
+        try {
+            Customer.retrieve(customerId).delete()
+            logger.info("✅ Deleted Stripe customer $customerId")
+        } catch (e: StripeException) {
+            logger.error("❌ Failed to delete Stripe customer $customerId: ${e.message}")
+            throw RuntimeException("Failed to delete Stripe customer: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Requests deletion of a Stripe Connect Express account.
+     *
+     * Stripe rejects this if the account has a non-zero balance or pending
+     * payouts. In that case, we log and continue — Stripe will close the
+     * account once outstanding payouts settle.  The user row is still
+     * deleted on our side; Stripe will eventually close the account.
+     */
+    fun deleteConnectedAccount(stripeAccountId: String) {
+        try {
+            Account.retrieve(stripeAccountId).delete()
+            logger.info("✅ Deleted Stripe Connect account $stripeAccountId")
+        } catch (e: StripeException) {
+            logger.error("❌ Failed to delete Stripe account $stripeAccountId: ${e.message}")
+            throw RuntimeException("Failed to delete Stripe account: ${e.message}", e)
+        }
+    }
+
+    // ── Fee calculation ──────────────────────────────────────────────────────
+
     fun calculateFeeBreakdown(amount: BigDecimal): FeeBreakdown {
         val amountCents = toCents(amount)
 
@@ -294,9 +323,9 @@ class StripePaymentService(
         senderCustomerId: String
     ): PaymentIntent {
         try {
-            val breakdown = calculateFeeBreakdown(amount)   // single source of truth
-            val amountCents          = breakdown.senderPaysCents
-            val applicationFeeCents  = breakdown.totalFeeCents
+            val breakdown = calculateFeeBreakdown(amount)
+            val amountCents         = breakdown.senderPaysCents
+            val applicationFeeCents = breakdown.totalFeeCents
 
             if (amountCents < minimumChargeCents)
                 throw IllegalArgumentException("Tip is below minimum charge: $minimumChargeCents cents")
@@ -317,11 +346,11 @@ class StripePaymentService(
                             .setDestination(receiverStripeAccountId)
                             .build()
                     )
-                    .putMetadata("sender_id",         senderId.toString())
-                    .putMetadata("receiver_id",       receiverId.toString())
-                    .putMetadata("tip_nonce",         tipNonce)
-                    .putMetadata("gross_cents",       amountCents.toString())
-                    .putMetadata("app_fee_cents",     applicationFeeCents.toString())
+                    .putMetadata("sender_id",          senderId.toString())
+                    .putMetadata("receiver_id",        receiverId.toString())
+                    .putMetadata("tip_nonce",          tipNonce)
+                    .putMetadata("gross_cents",        amountCents.toString())
+                    .putMetadata("app_fee_cents",      applicationFeeCents.toString())
                     .putMetadata("receiver_net_cents", breakdown.receiverGetsCents.toString())
                     .build()
             )
@@ -332,6 +361,56 @@ class StripePaymentService(
             throw RuntimeException("Failed to create payment intent: ${e.message}", e)
         }
     }
+
+    fun createPaymentIntentUnconfirmed(
+        amount: BigDecimal,
+        receiverStripeAccountId: String,
+        senderId: UUID,
+        receiverId: UUID,
+        tipNonce: String,
+        paymentMethodId: String,
+        senderCustomerId: String
+    ): PaymentIntent {
+        try {
+            val breakdown = calculateFeeBreakdown(amount)
+            val amountCents         = breakdown.senderPaysCents
+            val applicationFeeCents = breakdown.totalFeeCents
+ 
+            if (amountCents < minimumChargeCents)
+                throw IllegalArgumentException("Tip is below minimum charge: $minimumChargeCents cents")
+            if (applicationFeeCents >= amountCents)
+                throw IllegalArgumentException("Computed fee ($applicationFeeCents) must be less than amount ($amountCents)")
+ 
+            // confirm=false — client confirms via Stripe iOS SDK
+            val paymentIntent = PaymentIntent.create(
+                PaymentIntentCreateParams.builder()
+                    .setAmount(amountCents)
+                    .setCurrency("usd")
+                    .setCustomer(senderCustomerId)
+                    .setPaymentMethod(paymentMethodId)
+                    // confirm intentionally omitted (defaults to false)
+                    .setApplicationFeeAmount(applicationFeeCents)
+                    .setTransferData(
+                        PaymentIntentCreateParams.TransferData.builder()
+                            .setDestination(receiverStripeAccountId)
+                            .build()
+                    )
+                    .putMetadata("sender_id",          senderId.toString())
+                    .putMetadata("receiver_id",        receiverId.toString())
+                    .putMetadata("tip_nonce",          tipNonce)
+                    .putMetadata("gross_cents",        amountCents.toString())
+                    .putMetadata("app_fee_cents",      applicationFeeCents.toString())
+                    .putMetadata("receiver_net_cents", breakdown.receiverGetsCents.toString())
+                    .build()
+            )
+            logger.info("✅ Unconfirmed PaymentIntent ${paymentIntent.id} created for client confirmation")
+            return paymentIntent
+        } catch (e: StripeException) {
+            logger.error("❌ Failed to create unconfirmed PaymentIntent: ${e.message}", e)
+            throw RuntimeException("Failed to create payment intent: ${e.message}", e)
+        }
+    }
+ 
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 

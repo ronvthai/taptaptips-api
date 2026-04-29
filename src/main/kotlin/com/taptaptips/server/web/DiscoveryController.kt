@@ -17,19 +17,25 @@ class DiscoveryController(
     private val users: AppUserRepository
 ) {
 
+    companion object {
+        // FIX: Cap search query length to prevent expensive wildcard scans.
+        // A 50-char search is more than enough for display-name matching;
+        // longer inputs just add DB cost with no UX benefit.
+        const val MAX_SEARCH_QUERY_LENGTH = 50
+
+        // Cap batch sizes so a single request can't enumerate the whole user table
+        const val MAX_BATCH_SIZE = 100
+    }
+
     /**
      * Resolve a user by their exact email address (primary BLE discovery method).
-     *
      * Uses the citext UNIQUE index — O(log n).
      */
     @GetMapping("/resolve/email/{email}")
     fun resolveByEmail(@PathVariable email: String): UserDiscoveryDto {
         val normalized = email.trim().lowercase()
-
-        // Exact match via indexed column
         val user = users.findByEmail(normalized)
             ?: throw UserNotFoundException("No user found with email: $email")
-
         return user.toDiscoveryDto()
     }
 
@@ -38,6 +44,9 @@ class DiscoveryController(
      */
     @PostMapping("/resolve-batch-email")
     fun resolveByEmails(@RequestBody request: BatchResolveEmailRequest): BatchResolveResponse {
+        if (request.emails.size > MAX_BATCH_SIZE) {
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Batch size exceeds maximum of $MAX_BATCH_SIZE")
+        }
         val results = request.emails.mapNotNull { email ->
             runCatching { resolveByEmail(email) }.getOrNull()
         }
@@ -46,9 +55,6 @@ class DiscoveryController(
 
     /**
      * Resolve a short user ID (first 8 hex chars of the UUID) to a user.
-     *
-     * Uses a prefix LIKE query against the primary key — no table scan.
-     * Kept for backward compatibility with older BLE advertisement payloads.
      */
     @GetMapping("/resolve/{shortId}")
     fun resolveShortId(@PathVariable shortId: String): UserDiscoveryDto {
@@ -70,6 +76,9 @@ class DiscoveryController(
      */
     @PostMapping("/resolve-batch")
     fun resolveShortIds(@RequestBody request: BatchResolveRequest): BatchResolveResponse {
+        if (request.shortIds.size > MAX_BATCH_SIZE) {
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Batch size exceeds maximum of $MAX_BATCH_SIZE")
+        }
         val results = request.shortIds.mapNotNull { shortId ->
             runCatching { resolveShortId(shortId) }.getOrNull()
         }
@@ -77,7 +86,12 @@ class DiscoveryController(
     }
 
     /**
-     * Display-name search — uses indexed LIKE query, capped at 50.
+     * Display-name search — uses indexed LIKE query, capped at 50 results.
+     *
+     * FIX: Query length is now capped at MAX_SEARCH_QUERY_LENGTH (50 chars).
+     * An unbounded LIKE '%<user input>%' query on a large table is expensive;
+     * capping the input prevents a single request from triggering a multi-second
+     * table scan via an extremely long search string.
      */
     @GetMapping("/search")
     fun searchUsers(
@@ -86,6 +100,12 @@ class DiscoveryController(
     ): List<UserDiscoveryDto> {
         if (query.length < 2) {
             throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Query must be at least 2 characters")
+        }
+        if (query.length > MAX_SEARCH_QUERY_LENGTH) {
+            throw ResponseStatusException(
+                HttpStatus.BAD_REQUEST,
+                "Query too long (max $MAX_SEARCH_QUERY_LENGTH characters)"
+            )
         }
         return users.searchByDisplayName(query)
             .take(limit.coerceIn(1, 50))

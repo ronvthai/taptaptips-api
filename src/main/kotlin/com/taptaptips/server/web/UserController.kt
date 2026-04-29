@@ -1,7 +1,13 @@
 package com.taptaptips.server.web
 
 import com.taptaptips.server.repo.AppUserRepository
+import com.taptaptips.server.repo.BankAccountRepository
 import com.taptaptips.server.repo.DeviceRepository
+import com.taptaptips.server.repo.FcmTokenRepository
+import com.taptaptips.server.repo.PasswordResetTokenRepository
+import com.taptaptips.server.repo.TipRepository
+import com.taptaptips.server.service.StripePaymentService
+import org.slf4j.LoggerFactory
 import org.springframework.http.CacheControl
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
@@ -9,6 +15,8 @@ import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
 import org.springframework.security.core.annotation.AuthenticationPrincipal
 import org.springframework.security.core.context.SecurityContextHolder
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder
+import org.springframework.transaction.annotation.Transactional
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.multipart.MultipartFile
 import org.springframework.web.server.ResponseStatusException
@@ -21,8 +29,16 @@ import java.util.concurrent.ConcurrentHashMap
 @RequestMapping("/users")
 class UserController(
     private val users: AppUserRepository,
-    private val devices: DeviceRepository
+    private val devices: DeviceRepository,
+    private val fcmTokens: FcmTokenRepository,
+    private val bankAccounts: BankAccountRepository,
+    private val passwordResetTokens: PasswordResetTokenRepository,
+    private val tips: TipRepository,
+    private val stripeService: StripePaymentService
 ) {
+    private val log = LoggerFactory.getLogger(javaClass)
+    private val encoder = BCryptPasswordEncoder()
+
     data class UserStatusResponse(
         val suspended: Boolean,
         val suspensionReason: String?,
@@ -44,6 +60,136 @@ class UserController(
         val username: String,
         val displayName: String?
     )
+
+    // ============================================
+    // Account Deletion (Apple Guideline 5.1.1)
+    // ============================================
+
+    /**
+     * DELETE /users/{id}
+     *
+     * Permanently deletes the caller's account and all associated data.
+     * Requires the caller's current password for confirmation so that a stolen
+     * JWT alone cannot trigger deletion.
+     *
+     * Cascade order:
+     *   1. Password verification (abort early on mismatch)
+     *   2. FCM tokens       — stops push delivery immediately
+     *   3. BLE token        — removes from in-memory map
+     *   4. Devices          — clears Ed25519 public keys
+     *   5. Password reset tokens
+     *   6. Bank accounts
+     *   7. Tips             — null out sender/receiver FK to preserve dispute
+     *                         records for Stripe/tax purposes; raw amounts remain
+     *   8. Stripe Customer  — detaches all saved cards
+     *   9. Stripe Connect account — queued for deletion by Stripe
+     *  10. app_user row     — hard delete
+     *
+     * Tip rows are NOT deleted: they are financial records that Stripe and the
+     * platform may need for disputes and 1099-K reporting. Instead, the sender
+     * and receiver FK columns are set to NULL so no PII can be retrieved through
+     * the tip. If your jurisdiction requires full erasure, swap the null-out for
+     * a hard delete after confirming no open disputes exist.
+     */
+    @DeleteMapping("/{id}")
+    @Transactional
+    fun deleteAccount(
+        @PathVariable id: UUID,
+        @RequestBody body: DeleteAccountRequest
+    ): ResponseEntity<Any> {
+        // IDOR: callers may only delete their own account
+        val callerId = authUserId()
+        if (callerId != id) {
+            throw ResponseStatusException(HttpStatus.FORBIDDEN, "You may only delete your own account")
+        }
+
+        val user = users.findById(id).orElseThrow {
+            ResponseStatusException(HttpStatus.NOT_FOUND, "User not found")
+        }
+
+        // Require current password — a stolen JWT alone must not be enough
+        if (!encoder.matches(body.currentPassword, user.passwordHash)) {
+            throw ResponseStatusException(HttpStatus.FORBIDDEN, "Incorrect password")
+        }
+
+        log.info("🗑️ Account deletion requested for user $id")
+
+        // 1. FCM tokens — stop push delivery before anything else
+        fcmTokens.deleteByUser_Id(id)
+        log.info("   ✓ FCM tokens deleted")
+
+        // 2. BLE token — remove from in-memory discovery map
+        endpointMappings.entries.removeIf { it.value == id }
+        log.info("   ✓ BLE endpoint mappings cleared")
+
+        // 3. Devices (Ed25519 public keys)
+        val userDevices = devices.findAllByUser_Id(id)
+        devices.deleteAll(userDevices)
+        log.info("   ✓ Devices deleted (${userDevices.size})")
+
+        // 4. Password reset tokens
+        val resetTokens = passwordResetTokens.findByUser(user)
+        passwordResetTokens.deleteAll(resetTokens)
+        log.info("   ✓ Password reset tokens deleted")
+
+        // 5. Bank account records
+        val banks = bankAccounts.findAllByUserId(id)
+        bankAccounts.deleteAll(banks)
+        log.info("   ✓ Bank account records deleted")
+
+        // 6. Null out tip FK references — preserve financial records, strip PII
+        //    Tips where this user was the sender
+        val sentTips = tips.findBySender_IdAndCreatedAtBetween(
+            id,
+            java.time.Instant.EPOCH,
+            java.time.Instant.now()
+        )
+        sentTips.forEach { it.sender?.let { _ -> /* sender is a val — handled via JPQL below */ } }
+
+        // Use a bulk JPQL update to null out the FK without loading every tip entity
+        tips.nullifySenderReferences(id)
+        tips.nullifyReceiverReferences(id)
+        log.info("   ✓ Tip FK references nullified (${sentTips.size} sent)")
+
+        // 7. Stripe Customer — detach saved cards, then delete customer
+        val stripeCustomerId = user.stripeCustomerId
+        if (stripeCustomerId != null) {
+            try {
+                stripeService.deleteCustomer(stripeCustomerId)
+                log.info("   ✓ Stripe customer $stripeCustomerId deleted")
+            } catch (e: Exception) {
+                // Log but don't abort — we still want the account row gone
+                log.warn("   ⚠️ Stripe customer deletion failed (continuing): ${e.message}")
+            }
+        }
+
+        // 8. Stripe Connect account — queue for deletion (Express accounts can
+        //    only be deleted after all pending payouts settle; Stripe will reject
+        //    if a balance remains. Log and continue in that case.)
+        val stripeAccountId = user.stripeAccountId
+        if (stripeAccountId != null) {
+            try {
+                stripeService.deleteConnectedAccount(stripeAccountId)
+                log.info("   ✓ Stripe Connect account $stripeAccountId deleted")
+            } catch (e: Exception) {
+                log.warn("   ⚠️ Stripe Connect account deletion failed (continuing): ${e.message}")
+            }
+        }
+
+        // 9. Delete the user row — foreign-key cascades handle any remaining child rows
+        users.delete(user)
+        log.info("✅ Account $id fully deleted")
+
+        return ResponseEntity.noContent().build()
+    }
+
+    data class DeleteAccountRequest(
+        val currentPassword: String
+    )
+
+    // ============================================
+    // Endpoint registration (BLE discovery)
+    // ============================================
 
     @PostMapping("/register-endpoint")
     fun registerEndpoint(
@@ -92,12 +238,6 @@ class UserController(
             ))
     }
 
-    @GetMapping("/endpoint-mappings")
-    fun getEndpointMappings(): ResponseEntity<Map<String, String>> {
-        // TODO: Add admin authorization check
-        return ResponseEntity.ok(endpointMappings.mapValues { it.value.toString() })
-    }
-
     @DeleteMapping("/endpoint/{endpointId}")
     fun clearEndpoint(
         @PathVariable endpointId: String,
@@ -123,7 +263,6 @@ class UserController(
         @PathVariable id: UUID,
         @RequestParam("file") file: MultipartFile
     ): ResponseEntity<Any> {
-        // IDOR fix: callers may only update their own avatar
         if (authUserId() != id) {
             throw ResponseStatusException(HttpStatus.FORBIDDEN, "You may only update your own avatar")
         }
@@ -265,8 +404,14 @@ class UserController(
 
     data class UpdateUserReq(
         val email: String?,
+        /** Display name — max 100 chars enforced below. */
         val displayName: String?,
-        val password: String?
+        val password: String?,
+        /**
+         * Required when changing password.
+         * A stolen JWT alone must not be sufficient to lock out the real owner.
+         */
+        val currentPassword: String?
     )
 
     @PatchMapping("/{id}")
@@ -274,19 +419,38 @@ class UserController(
         @PathVariable id: UUID,
         @RequestBody body: UpdateUserReq
     ): ResponseEntity<Any> {
-        // IDOR fix: callers may only update their own profile
         if (authUserId() != id) {
             throw ResponseStatusException(HttpStatus.FORBIDDEN, "You may only update your own profile")
         }
 
-        // Password policy: enforce minimum length on updates (same rule as registration)
-        if (body.password != null && body.password.length < 8) {
-            return ResponseEntity
-                .status(HttpStatus.BAD_REQUEST)
-                .body(mapOf("error" to "Password must be at least 8 characters long"))
+        // ── Input length limits ──────────────────────────────────────────────
+        if (body.email != null && body.email.length > 254) {
+            return ResponseEntity.badRequest().body(mapOf("error" to "Email too long (max 254 chars)"))
+        }
+        if (body.displayName != null && body.displayName.length > 100) {
+            return ResponseEntity.badRequest().body(mapOf("error" to "Display name too long (max 100 chars)"))
         }
 
+        // ── Password change requires current password ────────────────────────
         val u = users.findById(id).orElseThrow()
+
+        if (body.password != null) {
+            if (body.password.length < 8) {
+                return ResponseEntity
+                    .status(HttpStatus.BAD_REQUEST)
+                    .body(mapOf("error" to "Password must be at least 8 characters long"))
+            }
+            if (body.currentPassword.isNullOrBlank()) {
+                return ResponseEntity
+                    .status(HttpStatus.BAD_REQUEST)
+                    .body(mapOf("error" to "currentPassword is required to change your password"))
+            }
+            if (!encoder.matches(body.currentPassword, u.passwordHash)) {
+                return ResponseEntity
+                    .status(HttpStatus.FORBIDDEN)
+                    .body(mapOf("error" to "Incorrect current password"))
+            }
+        }
 
         var changed = false
         body.email?.let {
@@ -300,7 +464,6 @@ class UserController(
 
         if (!changed) return ResponseEntity.ok(mapOf("status" to "NOOP"))
 
-        val encoder = org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder()
         val newEntity = com.taptaptips.server.domain.AppUser(
             id           = u.id,
             email        = body.email ?: u.email,
@@ -309,14 +472,12 @@ class UserController(
             createdAt    = u.createdAt,
             updatedAt    = java.time.Instant.now(),
             profilePicture = u.profilePicture,
-            // Preserve Stripe receiver fields
             wantsToReceiveTips = u.wantsToReceiveTips,
             stripeAccountId    = u.stripeAccountId,
             stripeOnboarded    = u.stripeOnboarded,
             stripeLastChecked  = u.stripeLastChecked,
             bankLast4          = u.bankLast4,
             bankName           = u.bankName,
-            // Preserve Stripe sender fields
             stripeCustomerId       = u.stripeCustomerId,
             defaultPaymentMethodId = u.defaultPaymentMethodId
         )

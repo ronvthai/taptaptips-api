@@ -4,6 +4,7 @@ import com.taptaptips.server.domain.Tip
 import org.springframework.data.domain.Page
 import org.springframework.data.domain.Pageable
 import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
 import java.time.Instant
@@ -28,12 +29,6 @@ interface TipRepository : JpaRepository<Tip, UUID> {
     ): List<Tip>
 
     // ── FIX: FETCH JOIN eliminates N+1 on sender/receiver display names ──
-    // Each of these issues exactly ONE SQL query regardless of result size.
-    // Previously, mapping tip.sender?.displayName in the controller triggered
-    // a separate SELECT per tip (N+1). The FETCH JOIN collapses that into a
-    // single JOIN query, and the Page<Tip> overload adds LIMIT/OFFSET so a
-    // receiver with hundreds of tips never loads them all into memory at once.
-
     @Query("""
         SELECT t FROM Tip t
         LEFT JOIN FETCH t.sender
@@ -78,7 +73,7 @@ interface TipRepository : JpaRepository<Tip, UUID> {
         pageable: Pageable
     ): Page<Tip>
 
-    // ── Webhook lookups: FETCH JOIN already present, keep as-is ──
+    // ── Webhook lookups ──
     @Query("SELECT t FROM Tip t LEFT JOIN FETCH t.sender LEFT JOIN FETCH t.receiver WHERE t.paymentIntentId = :id")
     fun findByPaymentIntentId(@Param("id") id: String): Tip?
 
@@ -90,4 +85,17 @@ interface TipRepository : JpaRepository<Tip, UUID> {
 
     @Query("SELECT COUNT(t) FROM Tip t WHERE t.sender.id = :senderId AND t.status = 'DISPUTED'")
     fun countDisputesBySender(@Param("senderId") senderId: UUID): Long
+
+    // ── Account deletion: null out FK references without deleting tip rows ──
+    // Tip rows are financial records retained for Stripe disputes and tax
+    // reporting. On account deletion, we strip the user FK so no PII is
+    // reachable through the tip, but the amounts and timestamps remain.
+
+    @Modifying
+    @Query("UPDATE Tip t SET t.sender = NULL WHERE t.sender.id = :userId")
+    fun nullifySenderReferences(@Param("userId") userId: UUID)
+
+    @Modifying
+    @Query("UPDATE Tip t SET t.receiver = NULL WHERE t.receiver.id = :userId")
+    fun nullifyReceiverReferences(@Param("userId") userId: UUID)
 }

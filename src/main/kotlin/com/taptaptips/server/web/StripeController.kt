@@ -387,7 +387,7 @@ class StripeController(
      * If paymentMethodId is provided, use that specific card
      * Otherwise, use user's default payment method
      */
-    @PostMapping("/payment-intent")
+     @PostMapping("/payment-intent")
     fun createPaymentIntent(
         @RequestBody request: CreatePaymentIntentRequest
     ): PaymentIntentResponse {
@@ -395,73 +395,51 @@ class StripeController(
         val sender = userRepository.findById(senderId).orElseThrow {
             ResponseStatusException(HttpStatus.NOT_FOUND, "Sender not found")
         }
-        
-        logger.info("💰 Creating payment intent")
+ 
+        logger.info("💰 Creating payment intent (unconfirmed — client will confirm)")
         logger.info("   Sender: $senderId")
         logger.info("   Receiver: ${request.receiverId}")
         logger.info("   Amount: $${request.amount}")
-        
-        // Validate receiver
+ 
         val receiver = userRepository.findById(request.receiverId).orElseThrow {
             ResponseStatusException(HttpStatus.NOT_FOUND, "Receiver not found")
         }
-        
+ 
         if (receiver.stripeAccountId == null) {
-            throw ResponseStatusException(
-                HttpStatus.BAD_REQUEST,
-                "Receiver has not set up payment receiving"
-            )
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Receiver has not set up payment receiving")
         }
-        
         if (!receiver.stripeOnboarded) {
-            throw ResponseStatusException(
-                HttpStatus.BAD_REQUEST,
-                "Receiver has not completed Stripe account setup"
-            )
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Receiver has not completed Stripe account setup")
         }
-        
-        // Determine which payment method to use
+ 
         val paymentMethodId = request.paymentMethodId ?: sender.defaultPaymentMethodId
-        
-        if (paymentMethodId == null) {
-            throw ResponseStatusException(
-                HttpStatus.BAD_REQUEST,
-                "No payment method available. Please add a card first."
-            )
-        }
-        
-        logger.info("   Using payment method: $paymentMethodId")
-        
-        // Ensure sender has a customer ID
+            ?: throw ResponseStatusException(HttpStatus.BAD_REQUEST, "No payment method available. Please add a card first.")
+ 
         if (sender.stripeCustomerId == null) {
-            throw ResponseStatusException(
-                HttpStatus.BAD_REQUEST,
-                "Sender customer not found. Please add a payment method first."
-            )
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Sender customer not found. Please add a payment method first.")
         }
-        
-        logger.info("   Sender customer: ${sender.stripeCustomerId}")
-        
-        // Create and auto-confirm payment intent
-        val paymentIntent = stripeService.createPaymentIntentWithSavedMethod(
-            amount = request.amount,
+ 
+        logger.info("   Using payment method: $paymentMethodId")
+ 
+        // Unconfirmed — Stripe iOS SDK confirms using the returned clientSecret
+        val paymentIntent = stripeService.createPaymentIntentUnconfirmed(
+            amount                  = request.amount,
             receiverStripeAccountId = receiver.stripeAccountId!!,
-            senderId = senderId,
-            receiverId = request.receiverId,
-            tipNonce = request.nonce,
-            paymentMethodId = paymentMethodId,
-            senderCustomerId = sender.stripeCustomerId!!  // FIXED: Pass customer ID
+            senderId                = senderId,
+            receiverId              = request.receiverId,
+            tipNonce                = request.nonce,
+            paymentMethodId         = paymentMethodId,
+            senderCustomerId        = sender.stripeCustomerId!!
         )
-        
-        logger.info("✅ Payment intent created: ${paymentIntent.id}")
-        logger.info("   Status: ${paymentIntent.status}")
-        
+ 
+        logger.info("✅ Unconfirmed payment intent created: ${paymentIntent.id}")
+ 
         return PaymentIntentResponse(
-            clientSecret = paymentIntent.clientSecret,
-            paymentIntentId = paymentIntent.id,
-            receiverName = receiver.displayName,
+            clientSecret      = paymentIntent.clientSecret,
+            paymentIntentId   = paymentIntent.id,
+            receiverName      = receiver.displayName,
             receiverBankLast4 = receiver.bankLast4,
-            status = paymentIntent.status
+            status            = paymentIntent.status   // "requires_confirmation"
         )
     }
 }
