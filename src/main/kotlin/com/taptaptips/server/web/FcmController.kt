@@ -3,6 +3,7 @@ package com.taptaptips.server.web
 import com.taptaptips.server.domain.FcmToken
 import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.repo.FcmTokenRepository
+import org.slf4j.LoggerFactory
 import org.springframework.http.ResponseEntity
 import org.springframework.security.core.context.SecurityContextHolder
 import org.springframework.web.bind.annotation.*
@@ -15,30 +16,48 @@ class FcmController(
     private val fcmTokenRepository: FcmTokenRepository,
     private val userRepository: AppUserRepository
 ) {
-    
+    private val logger = LoggerFactory.getLogger(FcmController::class.java)
+
     private fun authUserId(): UUID =
         UUID.fromString(SecurityContextHolder.getContext().authentication.name)
-    
+
     /**
      * Register or update FCM token for the current user.
      * Called when the app starts or when FCM token is refreshed.
+     *
+     * IMPORTANT: when the same FCM token is re-registered under a different
+     * user (i.e. account switch on the same physical device), this re-points
+     * the row at the new user.  Without this, notifications for the OLD
+     * user would keep arriving on the device that's now logged in as the
+     * NEW user.
      */
     @PostMapping("/register")
     fun registerToken(@RequestBody request: RegisterFcmTokenRequest): ResponseEntity<Any> {
         val userId = authUserId()
         val user = userRepository.findById(userId).orElseThrow()
-        
+
         // Check if token already exists
         val existing = fcmTokenRepository.findByToken(request.token)
-        
+
         if (existing != null) {
-            // Update existing token
+            // ⭐ Re-point the token at the *current* user.  This is the
+            // account-switch fix: if the existing row was registered under
+            // a different user (because someone logged out and logged in
+            // as a different user on this device), we MUST move the row to
+            // the new user, otherwise the old user's notifications keep
+            // arriving here.
+            val existingUserId = existing.user.id
+            if (existingUserId != userId) {
+                logger.info("🔄 FCM token re-assigned: was user=$existingUserId, now user=$userId")
+            }
+
+            existing.user = user                       // <-- the actual fix
             existing.platform = request.platform
             existing.deviceInfo = request.deviceInfo
             existing.updatedAt = Instant.now()
             existing.isActive = true
             fcmTokenRepository.save(existing)
-            
+
             return ResponseEntity.ok(mapOf(
                 "status" to "updated",
                 "tokenId" to existing.id.toString()
@@ -52,21 +71,24 @@ class FcmController(
                 deviceInfo = request.deviceInfo
             )
             fcmTokenRepository.save(newToken)
-            
+
             return ResponseEntity.ok(mapOf(
                 "status" to "registered",
                 "tokenId" to newToken.id.toString()
             ))
         }
     }
-    
+
     /**
-     * Delete FCM token (called when user logs out or uninstalls app)
+     * Delete FCM token (called when user logs out or uninstalls app).
+     *
+     * The client should call this BEFORE clearing the JWT, so the request
+     * is still authenticated and the cleanup happens cleanly.
      */
     @DeleteMapping("/token")
     fun deleteToken(@RequestParam token: String): ResponseEntity<Any> {
         val fcmToken = fcmTokenRepository.findByToken(token)
-        
+
         return if (fcmToken != null) {
             fcmTokenRepository.delete(fcmToken)
             ResponseEntity.ok(mapOf("status" to "deleted"))
@@ -74,7 +96,7 @@ class FcmController(
             ResponseEntity.ok(mapOf("status" to "not_found"))
         }
     }
-    
+
     /**
      * Get all registered tokens for current user (debugging)
      */
@@ -82,10 +104,10 @@ class FcmController(
     fun getMyTokens(): ResponseEntity<Any> {
         val userId = authUserId()
         val tokens = fcmTokenRepository.findByUser_IdAndIsActiveTrue(userId)
-        
+
         return ResponseEntity.ok(mapOf(
             "count" to tokens.size,
-            "tokens" to tokens.map { 
+            "tokens" to tokens.map {
                 mapOf(
                     "platform" to it.platform,
                     "deviceInfo" to it.deviceInfo,

@@ -22,7 +22,7 @@ open class FcmToken(
     
     @ManyToOne(optional = false)
     @JoinColumn(name = "user_id")
-    val user: AppUser,
+    var user: AppUser,
     
     @Column(name = "token", nullable = false, unique = true, length = 500)
     var token: String,
