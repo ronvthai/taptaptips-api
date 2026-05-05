@@ -26,10 +26,12 @@ class RateLimitFilter(
         val path = request.requestURI
         val method = request.method
 
-        // Skip rate limiting for webhooks, health checks, and App Links verification
+        // Skip rate limiting for webhooks, health checks, App Links verification,
+        // and public config endpoints that carry no auth token.
         if (path.startsWith("/webhooks/") ||
             path.startsWith("/actuator/") ||
-            path.startsWith("/.well-known/")) {
+            path.startsWith("/.well-known/") ||
+            (path == "/stripe/config" && method == "GET")) {
             filterChain.doFilter(request, response)
             return
         }

@@ -49,6 +49,9 @@ class SecurityConfig(
                     .requestMatchers(HttpMethod.GET, "/reset-password").permitAll()
                     .requestMatchers(HttpMethod.GET, "/stripe/onboarding/complete").permitAll()
                     .requestMatchers(HttpMethod.GET, "/stripe/onboarding/refresh").permitAll()
+                    // Public endpoint — mobile app fetches the Stripe publishable key
+                    // before presenting payment UI, with no auth token available yet.
+                    .requestMatchers(HttpMethod.GET, "/stripe/config").permitAll()
                     .anyRequest().authenticated()
             }
             .addFilterBefore(rateLimitFilter, UsernamePasswordAuthenticationFilter::class.java)
