@@ -28,6 +28,9 @@ class EmailService(
     fun sendPasswordResetEmail(toEmail: String, resetToken: String, displayName: String) {
         try {
             val resetLink = "$frontendUrl/reset-password?token=$resetToken"
+        // Custom URL scheme link for Gmail and other email clients that don't
+        // support Universal Links. taptaptips:// always opens the app directly.
+        val appLink = "taptaptips://reset-password?token=$resetToken"
             
             val message: MimeMessage = mailSender.createMimeMessage()
             val helper = MimeMessageHelper(message, true, "UTF-8")
@@ -36,7 +39,7 @@ class EmailService(
             helper.setTo(toEmail)
             helper.setSubject("$appName - Password Reset Request")
             
-            val htmlContent = buildPasswordResetHtml(displayName, resetLink)
+            val htmlContent = buildPasswordResetHtml(displayName, resetLink, appLink)
             helper.setText(htmlContent, true)
             
             mailSender.send(message)
@@ -48,7 +51,7 @@ class EmailService(
         }
     }
     
-    private fun buildPasswordResetHtml(displayName: String, resetLink: String): String {
+    private fun buildPasswordResetHtml(displayName: String, resetLink: String, appLink: String): String {
         return """
             <!DOCTYPE html>
             <html>
@@ -71,7 +74,7 @@ class EmailService(
                     <p>To reset your password, click the button below:</p>
                     
                     <div style="text-align: center; margin: 30px 0;">
-                        <a href="$resetLink" 
+                        <a href="$appLink" 
                            style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
                                   color: white; 
                                   padding: 15px 40px; 
@@ -80,7 +83,7 @@ class EmailService(
                                   display: inline-block;
                                   font-weight: bold;
                                   box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-                            Reset Password
+                            Reset Password in App
                         </a>
                     </div>
                     
