@@ -3,6 +3,7 @@ package com.taptaptips.server.web
 import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.service.StripePaymentService
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.http.HttpStatus
 import org.springframework.security.core.context.SecurityContextHolder
 import org.springframework.web.bind.annotation.*
@@ -14,7 +15,9 @@ import java.util.*
 @RequestMapping("/stripe")
 class StripeController(
     private val stripeService: StripePaymentService,
-    private val userRepository: AppUserRepository
+    private val userRepository: AppUserRepository,
+    @Value("\${stripe.publishable.key}")
+    private val stripePublishableKey: String
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
     
@@ -22,6 +25,18 @@ class StripeController(
         SecurityContextHolder.getContext().authentication.name
     )
     
+    // ==================== PUBLIC ENDPOINTS ====================
+
+    /**
+     * Returns the Stripe publishable key so mobile clients can initialise
+     * the Stripe SDK before the user has a session (e.g. card entry screen).
+     * This endpoint is explicitly listed as permitAll() in SecurityConfig.
+     */
+    @GetMapping("/config")
+    fun getStripeConfig(): StripeConfigResponse {
+        return StripeConfigResponse(publishableKey = stripePublishableKey)
+    }
+
     // ==================== RECEIVER ENDPOINTS (EXISTING) ====================
     
     /**
@@ -445,6 +460,11 @@ class StripeController(
 }
 
 // ==================== RESPONSE DTOs ====================
+
+// Public DTOs
+data class StripeConfigResponse(
+    val publishableKey: String
+)
 
 // Receiver DTOs (existing)
 data class OnboardingStatusResponse(
