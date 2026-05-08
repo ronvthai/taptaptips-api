@@ -39,7 +39,7 @@ class EmailService(
             helper.setTo(toEmail)
             helper.setSubject("$appName - Password Reset Request")
             
-            val htmlContent = buildPasswordResetHtml(displayName, resetLink)
+            val htmlContent = buildPasswordResetHtml(displayName, resetLink, appLink)
             helper.setText(htmlContent, true)
             
             mailSender.send(message)
@@ -51,7 +51,7 @@ class EmailService(
         }
     }
     
-    private fun buildPasswordResetHtml(displayName: String, resetLink: String): String {
+    private fun buildPasswordResetHtml(displayName: String, resetLink: String, appLink: String): String {
         return """
             <!DOCTYPE html>
             <html>
