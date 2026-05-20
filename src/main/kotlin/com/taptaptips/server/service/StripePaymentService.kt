@@ -72,8 +72,13 @@ class StripePaymentService(
                     )
                     .setBusinessProfile(
                         AccountCreateParams.BusinessProfile.builder()
-                            .setMcc("7399")
-                            .setProductDescription("Personal tipping and service payments")
+                            // 7299 = Miscellaneous Personal Services. Not on any
+                            // network cash-advance list. Aligns with the platform
+                            // MCC so issuer risk models see a consistent merchant
+                            // category between platform and connected account.
+                            .setMcc("7299")
+                            .setProductDescription("In-person cashless tip from a customer to a service provider via TapTapTips marketplace")
+                            .setUrl("https://taptaptips.com")
                             .build()
                     )
                     .setMetadata(mapOf(
@@ -341,17 +346,34 @@ class StripePaymentService(
                     .setConfirm(true)
                     .setOffSession(true)
                     .setApplicationFeeAmount(applicationFeeCents)
+                    // Statement-descriptor suffix is appended to the platform's
+                    // descriptor on the cardholder's statement, producing e.g.
+                    // "TAPTAPTIPS.COM* TIP". Tells the issuer this is a tip,
+                    // not a P2P transfer / quasi-cash. Must be <= 22 chars
+                    // (combined with platform prefix <= 22), alphanumeric +
+                    // limited punctuation, no special chars like * < > ' " \\.
+                    .setStatementDescriptorSuffix("TIP")
+                    // Free-form description appears in dashboards and on some
+                    // issuer-side risk signals. Reinforces marketplace context.
+                    .setDescription("TapTapTips in-person tip to service provider")
                     .setTransferData(
                         PaymentIntentCreateParams.TransferData.builder()
                             .setDestination(receiverStripeAccountId)
                             .build()
                     )
+                    // on_behalf_of makes the connected account the "merchant of
+                    // record" for processing purposes (settlement currency,
+                    // regulatory jurisdiction) while the platform descriptor
+                    // still shows on cardholder statements. Recommended by
+                    // Stripe for marketplace destination charges.
+                    .setOnBehalfOf(receiverStripeAccountId)
                     .putMetadata("sender_id",          senderId.toString())
                     .putMetadata("receiver_id",        receiverId.toString())
                     .putMetadata("tip_nonce",          tipNonce)
                     .putMetadata("gross_cents",        amountCents.toString())
                     .putMetadata("app_fee_cents",      applicationFeeCents.toString())
                     .putMetadata("receiver_net_cents", breakdown.receiverGetsCents.toString())
+                    .putMetadata("charge_type",        "marketplace_tip")
                     .build()
             )
             logger.info("✅ PaymentIntent ${paymentIntent.id} status=${paymentIntent.status}")
@@ -390,17 +412,25 @@ class StripePaymentService(
                     .setPaymentMethod(paymentMethodId)
                     // confirm intentionally omitted (defaults to false)
                     .setApplicationFeeAmount(applicationFeeCents)
+                    // See createPaymentIntentWithSavedMethod for rationale on
+                    // suffix, description, and on_behalf_of. These three fields
+                    // together signal to issuers that this is a marketplace
+                    // tip, not a P2P transfer, reducing cash-advance flags.
+                    .setStatementDescriptorSuffix("TIP")
+                    .setDescription("TapTapTips in-person tip to service provider")
                     .setTransferData(
                         PaymentIntentCreateParams.TransferData.builder()
                             .setDestination(receiverStripeAccountId)
                             .build()
                     )
+                    .setOnBehalfOf(receiverStripeAccountId)
                     .putMetadata("sender_id",          senderId.toString())
                     .putMetadata("receiver_id",        receiverId.toString())
                     .putMetadata("tip_nonce",          tipNonce)
                     .putMetadata("gross_cents",        amountCents.toString())
                     .putMetadata("app_fee_cents",      applicationFeeCents.toString())
                     .putMetadata("receiver_net_cents", breakdown.receiverGetsCents.toString())
+                    .putMetadata("charge_type",        "marketplace_tip")
                     .build()
             )
             logger.info("✅ Unconfirmed PaymentIntent ${paymentIntent.id} created for client confirmation")
