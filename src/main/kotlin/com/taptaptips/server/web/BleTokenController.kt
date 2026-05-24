@@ -68,12 +68,18 @@ class BleTokenController(
     @PostMapping("/token")
     fun issueToken(): BleTokenResponse {
         val userId = authUserId().toString()
+        val now = System.currentTimeMillis()
+        val ttlMs = TimeUnit.HOURS.toMillis(10)
 
-        // Reuse if still valid
+        // Reuse if still valid — but slide the expiry forward so a logged-in
+        // user is guaranteed a fresh `now + ttlMs` window of discoverability.
+        // Token value stays the same, so senders who've already resolved this
+        // peer keep working without breakage.
         val existing = userToToken[userId]
         if (existing != null) {
             val entry = tokenToUser[existing]
-            if (entry != null && entry.expiresAt > System.currentTimeMillis()) {
+            if (entry != null && entry.expiresAt > now) {
+                tokenToUser[existing] = entry.copy(expiresAt = now + ttlMs)
                 return BleTokenResponse(token = existing)
             }
         }
@@ -89,8 +95,7 @@ class BleTokenController(
             )
         } while (tokenToUser.containsKey(token))
 
-        val ttlMs = TimeUnit.HOURS.toMillis(6)
-        tokenToUser[token] = TokenEntry(userId, System.currentTimeMillis() + ttlMs)
+        tokenToUser[token] = TokenEntry(userId, now + ttlMs)
 
         // Remove old token for this user if any
         val old = userToToken.put(userId, token)
