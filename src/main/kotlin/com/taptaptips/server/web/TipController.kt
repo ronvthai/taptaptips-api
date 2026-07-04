@@ -182,16 +182,17 @@ class TipController(
     }
 
     private fun Tip.toReceivedDto() = TipSummaryDto(
-        id             = id.toString(),
-        senderId       = sender?.id?.toString() ?: "",
-        senderName     = sender?.displayName    ?: "Unknown",
-        amount         = amount,
-        netAmount      = netAmount,
-        totalFees      = totalFees,
-        platformFee    = platformFee,
-        createdAt      = createdAt.toString(),
-        createdAtLocal = createdAtLocal.toString(),
-        timezone       = timezone
+        id               = id.toString(),
+        senderId         = sender?.id?.toString()   ?: "",
+        senderName       = sender?.displayName      ?: "Unknown",
+        senderOnboarded  = sender?.stripeOnboarded  ?: false,
+        amount           = amount,
+        netAmount        = netAmount,
+        totalFees        = totalFees,
+        platformFee      = platformFee,
+        createdAt        = createdAt.toString(),
+        createdAtLocal   = createdAtLocal.toString(),
+        timezone         = timezone
     )
 
     private fun Tip.toSentDto() = SentTipSummaryDto(
@@ -220,6 +221,16 @@ data class TipSummaryDto(
     val id: String,
     val senderId: String,
     val senderName: String,
+    /**
+     * Whether the sender can currently receive tips (has completed Stripe
+     * Connect onboarding). Used by the client's Received tab to gate the
+     * "Send Tip Back" button — no point offering the button if the tip
+     * would immediately fail with RECEIVER_NOT_ONBOARDED.
+     *
+     * Read from the cached `stripeOnboarded` flag on the User entity — no
+     * live Stripe API call, so this is cheap to include per row.
+     */
+    val senderOnboarded: Boolean = false,
     val amount: BigDecimal,
     val netAmount: BigDecimal?   = null,
     val totalFees: BigDecimal?   = null,
