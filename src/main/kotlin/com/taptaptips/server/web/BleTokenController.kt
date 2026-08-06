@@ -124,14 +124,28 @@ class BleTokenController(
         )
 
         val now = System.currentTimeMillis()
-        val results = request.tokens.mapNotNull { token ->
+
+        // Resolve token -> (still-valid) userId entries first, without hitting
+        // the DB, then fetch every user in a single findAllById() call. This
+        // replaces what was previously one findById() per token (up to 50
+        // individual queries per resolve call, and this endpoint is hit
+        // repeatedly during active BLE scanning).
+        val validEntries = request.tokens.mapNotNull { token ->
             val entry = tokenToUser[token] ?: return@mapNotNull null
             if (entry.expiresAt <= now) return@mapNotNull null        // expired
+            val userId = try {
+                UUID.fromString(entry.userId)
+            } catch (e: Exception) { return@mapNotNull null }
+            token to userId
+        }
 
-            val user = try {
-                users.findById(UUID.fromString(entry.userId)).orElse(null)
-            } catch (e: Exception) { null } ?: return@mapNotNull null
+        if (validEntries.isEmpty()) return BleResolveResponse(emptyList())
 
+        val usersById = users.findAllById(validEntries.map { it.second }.distinct())
+            .associateBy { it.id }
+
+        val results = validEntries.mapNotNull { (token, userId) ->
+            val user = usersById[userId] ?: return@mapNotNull null
             BleTokenProfile(
                 token       = token,
                 userId      = user.id.toString(),

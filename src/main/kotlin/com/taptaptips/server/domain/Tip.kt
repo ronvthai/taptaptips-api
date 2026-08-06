@@ -15,7 +15,29 @@ enum class TipStatus {
 }
 
 @Entity
-@Table(name = "tip")
+@Table(
+    name = "tip",
+    indexes = [
+        // Hit on every tip send — existsBySender_IdAndNonce() is the
+        // idempotency check that runs before any Stripe call is made.
+        Index(name = "idx_tip_sender_nonce", columnList = "sender_id,nonce"),
+
+        // Hit on every Stripe webhook event. Unique because a duplicate
+        // here means Stripe sent us a payment_intent/charge id collision,
+        // which should never happen and would indicate a real bug — a
+        // unique index catches that at the DB level instead of silently
+        // updating the wrong tip. Postgres unique indexes allow multiple
+        // NULLs, so this doesn't block PENDING tips that don't have a
+        // payment_intent_id / charge_id yet.
+        Index(name = "idx_tip_payment_intent_id", columnList = "payment_intent_id", unique = true),
+        Index(name = "idx_tip_charge_id", columnList = "charge_id", unique = true),
+
+        // Hit on every "received"/"sent" history page load (paginated,
+        // fetch-joined queries in TipRepository).
+        Index(name = "idx_tip_receiver_created_local", columnList = "receiver_id,created_at_local"),
+        Index(name = "idx_tip_sender_created_local", columnList = "sender_id,created_at_local")
+    ]
+)
 open class Tip(
     @Id val id: UUID = UUID.randomUUID(),
 
