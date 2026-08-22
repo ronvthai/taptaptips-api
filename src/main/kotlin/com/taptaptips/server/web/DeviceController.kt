@@ -4,8 +4,11 @@ import com.taptaptips.server.domain.Device
 import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.repo.DeviceRepository
 import org.slf4j.LoggerFactory
+import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
+import org.springframework.security.core.context.SecurityContextHolder
 import org.springframework.web.bind.annotation.*
+import org.springframework.web.server.ResponseStatusException
 import java.time.Instant
 import java.util.*
 import java.util.Base64
@@ -17,7 +20,10 @@ class DeviceController(
     private val userRepo: AppUserRepository
 ) {
     private val log = LoggerFactory.getLogger(DeviceController::class.java)
-    
+
+    private fun authUserId(): UUID =
+        UUID.fromString(SecurityContextHolder.getContext().authentication.name)
+
     data class RegisterDeviceReq(
         val userId: UUID, 
         val deviceName: String?, 
@@ -26,6 +32,20 @@ class DeviceController(
 
     @PostMapping
     fun register(@RequestBody r: RegisterDeviceReq): ResponseEntity<Any> {
+        // Bind to the authenticated principal — this is what was missing.
+        // The endpoint already required a valid JWT (SecurityConfig has no
+        // permitAll for /devices), but nothing previously checked that the
+        // userId in the request body actually belonged to whoever the JWT
+        // authenticates as. That let any logged-in user register a signing
+        // key against ANY OTHER account, which TipSecurityService would
+        // then trust for signing that other account's tips. Same pattern
+        // as the senderId check in TipSecurityService.verifyRequest().
+        val authedUserId = authUserId()
+        if (r.userId != authedUserId) {
+            log.warn("❌ Device registration userId mismatch: body=${r.userId}, authenticated=$authedUserId")
+            throw ResponseStatusException(HttpStatus.FORBIDDEN, "userId does not match authenticated user")
+        }
+
         val user = userRepo.findById(r.userId).orElseThrow { 
             IllegalArgumentException("User not found: ${r.userId}") 
         }

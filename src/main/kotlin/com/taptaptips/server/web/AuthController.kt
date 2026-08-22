@@ -6,10 +6,12 @@ import com.taptaptips.server.security.JwtService
 import com.taptaptips.server.service.StripePaymentService
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
+import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder
 import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.web.bind.annotation.*
+import org.springframework.web.multipart.MultipartFile
 
 @RestController
 @RequestMapping("/auth")
@@ -27,14 +29,8 @@ class AuthController(
         const val MAX_DISPLAY_NAME_LENGTH = 100
         const val MIN_PASSWORD_LENGTH     = 8
         const val MAX_PASSWORD_LENGTH     = 128  // prevents bcrypt DoS on very long inputs
+        const val MAX_AVATAR_BYTES        = 2_000_000
     }
-
-    data class RegisterReq(
-        val email: String,
-        val password: String,
-        val displayName: String,
-        val wantsToReceiveTips: Boolean = false
-    )
 
     data class LoginReq(val email: String, val password: String)
 
@@ -44,30 +40,36 @@ class AuthController(
         val timestamp: Long = System.currentTimeMillis()
     )
 
-    @PostMapping("/register")
-    fun register(@RequestBody r: RegisterReq): ResponseEntity<Any> {
-        logger.info("📝 Registration: email=${r.email}, wantsToReceiveTips=${r.wantsToReceiveTips}")
+    @PostMapping("/register", consumes = [MediaType.MULTIPART_FORM_DATA_VALUE])
+    fun register(
+        @RequestParam email: String,
+        @RequestParam password: String,
+        @RequestParam displayName: String,
+        @RequestParam(defaultValue = "false") wantsToReceiveTips: Boolean,
+        @RequestParam("avatar") avatar: MultipartFile
+    ): ResponseEntity<Any> {
+        logger.info("📝 Registration: email=$email, wantsToReceiveTips=$wantsToReceiveTips")
 
         // ── Input length limits ──────────────────────────────────────────────
-        if (r.email.length > MAX_EMAIL_LENGTH) {
+        if (email.length > MAX_EMAIL_LENGTH) {
             return ResponseEntity.badRequest().body(ErrorResponse(
                 error = "Email too long",
                 message = "Email must be at most $MAX_EMAIL_LENGTH characters"
             ))
         }
-        if (r.displayName.isBlank()) {
+        if (displayName.isBlank()) {
             return ResponseEntity.badRequest().body(ErrorResponse(
                 error = "Display name required",
                 message = "Please enter a display name"
             ))
         }
-        if (r.displayName.length > MAX_DISPLAY_NAME_LENGTH) {
+        if (displayName.length > MAX_DISPLAY_NAME_LENGTH) {
             return ResponseEntity.badRequest().body(ErrorResponse(
                 error = "Display name too long",
                 message = "Display name must be at most $MAX_DISPLAY_NAME_LENGTH characters"
             ))
         }
-        if (r.password.length > MAX_PASSWORD_LENGTH) {
+        if (password.length > MAX_PASSWORD_LENGTH) {
             return ResponseEntity.badRequest().body(ErrorResponse(
                 error = "Password too long",
                 message = "Password must be at most $MAX_PASSWORD_LENGTH characters"
@@ -75,15 +77,15 @@ class AuthController(
         }
 
         // ── Format and strength checks ───────────────────────────────────────
-        if (!isValidEmail(r.email)) {
-            logger.warn("❌ Registration failed: Invalid email format - ${r.email}")
+        if (!isValidEmail(email)) {
+            logger.warn("❌ Registration failed: Invalid email format - $email")
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ErrorResponse(
                 error = "Invalid email format",
                 message = "Please enter a valid email address"
             ))
         }
 
-        if (r.password.length < MIN_PASSWORD_LENGTH) {
+        if (password.length < MIN_PASSWORD_LENGTH) {
             logger.warn("❌ Registration failed: Password too short")
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ErrorResponse(
                 error = "Password too short",
@@ -91,26 +93,49 @@ class AuthController(
             ))
         }
 
-        if (userRepo.existsByEmail(r.email)) {
-            logger.warn("❌ Registration failed: Email already exists - ${r.email}")
+        if (userRepo.existsByEmail(email)) {
+            logger.warn("❌ Registration failed: Email already exists - $email")
             return ResponseEntity.status(HttpStatus.CONFLICT).body(ErrorResponse(
                 error = "Email already registered",
                 message = "An account with this email already exists. Please sign in instead."
             ))
         }
 
+        // ── Avatar validation ──────────────────────────────────────────────────
+        // Required server-side too — not just a client-side UI rule. This is
+        // what closes the gap that previously let accounts get created with
+        // no photo: registration used to be POST /auth/register (JSON, no
+        // avatar) followed by a *separate* PUT /users/{id}/avatar call. Any
+        // failure in that second call — including a mid-upload connection
+        // drop — left a fully valid, photo-less account behind. Now there is
+        // no second call: the account row is written with its photo already
+        // attached, in one request.
+        if (avatar.isEmpty) {
+            return ResponseEntity.badRequest().body(ErrorResponse(
+                error = "Profile photo required",
+                message = "Please add a profile photo to create your account"
+            ))
+        }
+        if (avatar.size > MAX_AVATAR_BYTES) {
+            return ResponseEntity.badRequest().body(ErrorResponse(
+                error = "Photo too large",
+                message = "Profile photo must be under ${MAX_AVATAR_BYTES / 1_000_000}MB"
+            ))
+        }
+
         return try {
             val u = userRepo.save(AppUser(
-                email        = r.email,
-                passwordHash = pwd.encode(r.password),
-                displayName  = r.displayName.trim(),
-                wantsToReceiveTips = r.wantsToReceiveTips
+                email        = email,
+                passwordHash = pwd.encode(password),
+                displayName  = displayName.trim(),
+                wantsToReceiveTips = wantsToReceiveTips,
+                profilePicture = avatar.bytes
             ))
 
-            logger.info("✅ Created user ${u.id}")
+            logger.info("✅ Created user ${u.id} (with avatar, ${avatar.size} bytes)")
 
             var stripeOnboardingUrl: String? = null
-            if (r.wantsToReceiveTips) {
+            if (wantsToReceiveTips) {
                 try {
                     logger.info("🏦 Creating Stripe account for user ${u.id}...")
                     val stripeAccountId = stripeService.createConnectedAccount(u)
@@ -127,7 +152,7 @@ class AuthController(
                 "userId"                  to u.id.toString(),
                 "username"                to u.displayName,
                 "wantsToReceiveTips"      to u.wantsToReceiveTips,
-                "requiresStripeOnboarding" to r.wantsToReceiveTips,
+                "requiresStripeOnboarding" to wantsToReceiveTips,
                 "stripeOnboardingUrl"     to stripeOnboardingUrl,
                 "isStripeOnboarded"       to false
             ))

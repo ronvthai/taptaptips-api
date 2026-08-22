@@ -1,6 +1,5 @@
 package com.taptaptips.server.web
 
-import com.taptaptips.server.domain.FcmToken
 import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.repo.FcmTokenRepository
 import org.slf4j.LoggerFactory
@@ -32,51 +31,28 @@ class FcmController(
      * NEW user.
      */
     @PostMapping("/register")
+    @org.springframework.transaction.annotation.Transactional
     fun registerToken(@RequestBody request: RegisterFcmTokenRequest): ResponseEntity<Any> {
         val userId = authUserId()
-        val user = userRepository.findById(userId).orElseThrow()
+        userRepository.findById(userId).orElseThrow()
 
-        // Check if token already exists
-        val existing = fcmTokenRepository.findByToken(request.token)
+        // Atomic upsert (see FcmTokenRepository.upsertToken) — replaces the
+        // find-then-save pattern that raced under concurrent requests for
+        // the same token and threw DataIntegrityViolationException on the
+        // idx_fcm_token unique constraint. Whichever user_id wins the last
+        // write is authoritative — same account-switch behavior as before,
+        // just race-proof now.
+        fcmTokenRepository.upsertToken(
+            id = UUID.randomUUID(),
+            userId = userId,
+            token = request.token,
+            platform = request.platform,
+            deviceInfo = request.deviceInfo,
+            now = Instant.now()
+        )
+        logger.info("📱 FCM token upserted for user=$userId platform=${request.platform}")
 
-        if (existing != null) {
-            // ⭐ Re-point the token at the *current* user.  This is the
-            // account-switch fix: if the existing row was registered under
-            // a different user (because someone logged out and logged in
-            // as a different user on this device), we MUST move the row to
-            // the new user, otherwise the old user's notifications keep
-            // arriving here.
-            val existingUserId = existing.user.id
-            if (existingUserId != userId) {
-                logger.info("🔄 FCM token re-assigned: was user=$existingUserId, now user=$userId")
-            }
-
-            existing.user = user                       // <-- the actual fix
-            existing.platform = request.platform
-            existing.deviceInfo = request.deviceInfo
-            existing.updatedAt = Instant.now()
-            existing.isActive = true
-            fcmTokenRepository.save(existing)
-
-            return ResponseEntity.ok(mapOf(
-                "status" to "updated",
-                "tokenId" to existing.id.toString()
-            ))
-        } else {
-            // Create new token
-            val newToken = FcmToken(
-                user = user,
-                token = request.token,
-                platform = request.platform,
-                deviceInfo = request.deviceInfo
-            )
-            fcmTokenRepository.save(newToken)
-
-            return ResponseEntity.ok(mapOf(
-                "status" to "registered",
-                "tokenId" to newToken.id.toString()
-            ))
-        }
+        return ResponseEntity.ok(mapOf("status" to "registered"))
     }
 
     /**
