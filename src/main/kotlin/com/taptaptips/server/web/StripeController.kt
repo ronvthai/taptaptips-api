@@ -1,6 +1,7 @@
 package com.taptaptips.server.web
 
 import com.taptaptips.server.repo.AppUserRepository
+import com.taptaptips.server.service.HeldTipService
 import com.taptaptips.server.service.StripePaymentService
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
@@ -16,6 +17,7 @@ import java.util.*
 class StripeController(
     private val stripeService: StripePaymentService,
     private val userRepository: AppUserRepository,
+    private val heldTipService: HeldTipService,
     @Value("\${stripe.publishable.key}")
     private val stripePublishableKey: String
 ) {
@@ -60,6 +62,17 @@ class StripeController(
         val isOnboarded = stripeService.checkAndUpdateOnboardingStatus(user)
         
         logger.info("✅ User $userId onboarding status: $isOnboarded")
+
+        // The app polls this right after the user returns from Stripe
+        // onboarding — the fastest moment to pay out anything held for them.
+        // Cheap no-op when nothing is held. Webhook + scheduler are backups.
+        if (isOnboarded) {
+            try {
+                heldTipService.releaseForReceiver(user.id)
+            } catch (e: Exception) {
+                logger.error("❌ Held-tip release after onboarding failed for $userId (scheduler will retry)", e)
+            }
+        }
         
         return OnboardingStatusResponse(
             isOnboarded = isOnboarded,

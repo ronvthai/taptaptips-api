@@ -32,7 +32,9 @@ class TipSecurityService(
         val receiverId: UUID,
         val amount: BigDecimal,
         val nonce: String,
-        val timestamp: Long
+        val timestamp: Long,
+        /** Device whose key verified the signature — stored on held tips for audit. */
+        val verifiedDeviceId: UUID? = null
     )
     
     object AlreadyProcessed : RuntimeException()
@@ -157,6 +159,6 @@ class TipSecurityService(
 
         log.info("✅ TIP VERIFIED - sender=${req.senderId}, receiver=${req.receiverId}, amount=${req.amount}, device=$verifiedDeviceId ($verifiedDeviceName)")
         
-        return VerifiedInput(req.senderId, req.receiverId, req.amount, req.nonce, req.timestamp)
+        return VerifiedInput(req.senderId, req.receiverId, req.amount, req.nonce, req.timestamp, verifiedDeviceId)
     }
 }

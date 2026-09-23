@@ -6,6 +6,8 @@ import com.taptaptips.server.repo.DeviceRepository
 import com.taptaptips.server.repo.FcmTokenRepository
 import com.taptaptips.server.repo.PasswordResetTokenRepository
 import com.taptaptips.server.repo.TipRepository
+import com.taptaptips.server.repo.HeldTipRepository
+import com.taptaptips.server.service.HeldTipService
 import com.taptaptips.server.service.StripePaymentService
 import org.slf4j.LoggerFactory
 import org.springframework.http.CacheControl
@@ -34,7 +36,9 @@ class UserController(
     private val bankAccounts: BankAccountRepository,
     private val passwordResetTokens: PasswordResetTokenRepository,
     private val tips: TipRepository,
-    private val stripeService: StripePaymentService
+    private val stripeService: StripePaymentService,
+    private val heldTipService: HeldTipService,
+    private val heldTips: HeldTipRepository
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     private val encoder = BCryptPasswordEncoder()
@@ -131,6 +135,14 @@ class UserController(
         val resetTokens = passwordResetTokens.findByUser(user)
         passwordResetTokens.deleteAll(resetTokens)
         log.info("   ✓ Password reset tokens deleted")
+
+        // 4b. Held tips — money parked for this user who never linked a bank.
+        //     Refund each one to its sender before the account disappears.
+        //     If this user was a SENDER of held tips, those still pay out to
+        //     the receiver; we only drop the sender id.
+        val refunded = heldTipService.refundAllForReceiver(id, "RECEIVER_ACCOUNT_DELETED")
+        heldTips.nullifySender(id)
+        log.info("   ✓ Held tips refunded to senders ($refunded)")
 
         // 5. Bank account records
         val banks = bankAccounts.findAllByUserId(id)

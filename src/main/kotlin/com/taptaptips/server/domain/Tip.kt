@@ -8,6 +8,8 @@ import java.time.LocalDate
 
 enum class TipStatus {
     PENDING,
+    /** Card charged, money parked on the platform until the receiver links a bank (see HeldTip). */
+    HELD,
     SUCCEEDED,
     FAILED,
     DISPUTED,

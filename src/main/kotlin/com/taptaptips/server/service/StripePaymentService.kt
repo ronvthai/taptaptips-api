@@ -2,6 +2,7 @@ package com.taptaptips.server.service
 
 import com.stripe.exception.StripeException
 import com.stripe.model.*
+import com.stripe.net.RequestOptions
 import com.stripe.param.*
 import com.taptaptips.server.domain.AppUser
 import com.taptaptips.server.repo.AppUserRepository
@@ -442,9 +443,173 @@ class StripePaymentService(
     }
  
 
+    // ── Held tips (receiver not onboarded yet) ───────────────────────────────
+    //
+    // Uses Stripe "separate charges and transfers": the sender is charged on the
+    // PLATFORM account (no transfer_data / on_behalf_of, because the receiver
+    // has no usable connected account yet). Funds sit in the platform balance
+    // until HeldTipService creates a Transfer with source_transaction = charge.
+    // The platform is merchant of record for these charges, so Stripe fees,
+    // refunds and chargebacks are debited from the platform balance.
+
+    fun createHeldPaymentIntent(
+        amount: BigDecimal,
+        senderId: UUID,
+        receiverId: UUID,
+        tipId: UUID,
+        heldTipId: UUID,
+        tipNonce: String,
+        transferGroup: String,
+        paymentMethodId: String,
+        senderCustomerId: String
+    ): PaymentIntent {
+        val breakdown = calculateFeeBreakdown(amount)
+        if (breakdown.senderPaysCents < minimumChargeCents)
+            throw IllegalArgumentException("Tip is below minimum charge: $minimumChargeCents cents")
+        if (breakdown.receiverGetsCents <= 0)
+            throw IllegalArgumentException("Tip is too small to cover fees")
+
+        try {
+            val paymentIntent = PaymentIntent.create(
+                PaymentIntentCreateParams.builder()
+                    .setAmount(breakdown.senderPaysCents)
+                    .setCurrency("usd")
+                    .setCustomer(senderCustomerId)
+                    .setPaymentMethod(paymentMethodId)
+                    .setConfirm(true)
+                    .setOffSession(true)
+                    .setStatementDescriptorSuffix("TIP")
+                    .setDescription("TapTapTips in-person tip to service provider")
+                    // Ties the charge to the later Transfer in the Dashboard/reports
+                    .setTransferGroup(transferGroup)
+                    .putMetadata("sender_id",          senderId.toString())
+                    .putMetadata("receiver_id",        receiverId.toString())
+                    .putMetadata("tip_id",             tipId.toString())
+                    .putMetadata("held_tip_id",        heldTipId.toString())
+                    .putMetadata("tip_nonce",          tipNonce)
+                    .putMetadata("gross_cents",        breakdown.senderPaysCents.toString())
+                    .putMetadata("app_fee_cents",      breakdown.totalFeeCents.toString())
+                    .putMetadata("receiver_net_cents", breakdown.receiverGetsCents.toString())
+                    .putMetadata("charge_type",        "held_tip")
+                    .build(),
+                // Same tip can never produce two charges, even if this call is retried
+                idempotent("held-tip-pi-$tipId")
+            )
+            logger.info("✅ Held-tip PaymentIntent ${paymentIntent.id} status=${paymentIntent.status}")
+            return paymentIntent
+        } catch (e: StripeException) {
+            logger.error("❌ Failed to create held-tip PaymentIntent: ${e.message}", e)
+            throw RuntimeException("Failed to create payment intent: ${e.message}", e)
+        }
+    }
+
+    /**
+     * True only when the connected account can actually receive a Transfer AND
+     * it belongs to [expectedUserId] (metadata.user_id is written by
+     * createConnectedAccount). The ownership check means a tampered
+     * app_user.stripe_account_id can't redirect held money to someone else.
+     */
+    fun isAccountReadyForTransfers(stripeAccountId: String, expectedUserId: UUID): Boolean {
+        return try {
+            val account = Account.retrieve(stripeAccountId)
+            val transfersActive = account.capabilities?.transfers == "active"
+            val payoutsEnabled  = account.payoutsEnabled == true
+            val ownerMatches    = account.metadata?.get("user_id") == expectedUserId.toString()
+            if (!ownerMatches) {
+                logger.error("🚨 Connected account $stripeAccountId metadata.user_id does not match $expectedUserId")
+            }
+            transfersActive && payoutsEnabled && ownerMatches
+        } catch (e: StripeException) {
+            logger.error("❌ Could not verify connected account $stripeAccountId: ${e.message}")
+            false
+        }
+    }
+
+    fun createHeldTipTransfer(
+        netCents: Long,
+        destinationAccountId: String,
+        sourceChargeId: String,
+        transferGroup: String,
+        heldTipId: UUID,
+        tipId: UUID,
+        receiverId: UUID
+    ): Transfer {
+        try {
+            return Transfer.create(
+                TransferCreateParams.builder()
+                    .setAmount(netCents)
+                    .setCurrency("usd")
+                    .setDestination(destinationAccountId)
+                    // Funds come from THIS charge only; also lets the transfer
+                    // be created before the charge's funds become "available".
+                    .setSourceTransaction(sourceChargeId)
+                    .setTransferGroup(transferGroup)
+                    .setDescription("TapTapTips held tip payout")
+                    .putMetadata("held_tip_id", heldTipId.toString())
+                    .putMetadata("tip_id",      tipId.toString())
+                    .putMetadata("receiver_id", receiverId.toString())
+                    .build(),
+                idempotent("held-tip-transfer-$heldTipId")
+            )
+        } catch (e: StripeException) {
+            logger.error("❌ Held-tip transfer failed for $heldTipId: ${e.message}")
+            throw RuntimeException("Transfer failed: ${e.message}", e)
+        }
+    }
+
+    /** Recovery helper: did a transfer for this group already go out? */
+    fun findTransferByGroup(transferGroup: String): Transfer? =
+        try {
+            Transfer.list(
+                TransferListParams.builder().setTransferGroup(transferGroup).setLimit(1L).build()
+            ).data.firstOrNull()
+        } catch (e: StripeException) {
+            logger.error("❌ Could not list transfers for $transferGroup: ${e.message}")
+            throw RuntimeException("Transfer lookup failed: ${e.message}", e)
+        }
+
+    fun refundHeldCharge(chargeId: String, heldTipId: UUID, reason: String): Refund {
+        try {
+            return Refund.create(
+                RefundCreateParams.builder()
+                    .setCharge(chargeId)
+                    .putMetadata("held_tip_id", heldTipId.toString())
+                    .putMetadata("reason", reason)
+                    .build(),
+                idempotent("held-tip-refund-$heldTipId")
+            )
+        } catch (e: StripeException) {
+            logger.error("❌ Refund failed for held tip $heldTipId: ${e.message}")
+            throw RuntimeException("Refund failed: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Pulls money back from a connected account after a released held tip is
+     * refunded or disputed. May fail if the receiver's Stripe balance is too
+     * low — the caller logs that for manual follow-up.
+     */
+    fun reverseTransfer(transferId: String, amountCents: Long, heldTipId: UUID): TransferReversal {
+        try {
+            return Transfer.retrieve(transferId).reversals.create(
+                TransferReversalCollectionCreateParams.builder()
+                    .setAmount(amountCents)
+                    .putMetadata("held_tip_id", heldTipId.toString())
+                    .build(),
+                idempotent("held-tip-reversal-$heldTipId")
+            )
+        } catch (e: StripeException) {
+            logger.error("❌ Transfer reversal failed for $transferId: ${e.message}")
+            throw RuntimeException("Transfer reversal failed: ${e.message}", e)
+        }
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private fun toCents(amount: BigDecimal): Long =
+    private fun idempotent(key: String): RequestOptions =
+        RequestOptions.builder().setIdempotencyKey(key).build()
+
+    fun toCents(amount: BigDecimal): Long =
         amount.setScale(2, RoundingMode.HALF_UP).movePointRight(2).longValueExact()
 
     private fun cents(c: Long): BigDecimal =

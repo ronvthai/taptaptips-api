@@ -7,6 +7,7 @@ import com.stripe.net.Webhook
 import com.taptaptips.server.domain.TipStatus
 import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.repo.TipRepository
+import com.taptaptips.server.service.HeldTipService
 import com.taptaptips.server.service.NotificationService
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
@@ -22,9 +23,16 @@ class StripeWebhookController(
     private val tipRepository: TipRepository,
     private val userRepository: AppUserRepository,
     private val notificationService: NotificationService,
+    private val heldTipService: HeldTipService,
 
     @Value("\${stripe.webhook.secret}")
-    private val webhookSecret: String
+    private val webhookSecret: String,
+
+    // Events from CONNECTED accounts (account.updated) are delivered to a
+    // separate "Connect" webhook endpoint in the Stripe Dashboard, which has
+    // its own signing secret. Optional: if blank, only the platform secret is used.
+    @Value("\${stripe.connect.webhook.secret:}")
+    private val connectWebhookSecret: String
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
 
@@ -37,7 +45,12 @@ class StripeWebhookController(
         logger.info("📥 Received webhook request")
 
         val event = try {
-            Webhook.constructEvent(payload, signature, webhookSecret)
+            try {
+                Webhook.constructEvent(payload, signature, webhookSecret)
+            } catch (e: SignatureVerificationException) {
+                if (connectWebhookSecret.isBlank()) throw e
+                Webhook.constructEvent(payload, signature, connectWebhookSecret)
+            }
         } catch (e: SignatureVerificationException) {
             logger.error("❌ Invalid webhook signature")
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("Invalid signature")
@@ -59,6 +72,7 @@ class StripeWebhookController(
                 "payment_intent.canceled" -> handlePaymentCanceled(event)
                 "radar.early_fraud_warning.created" -> handleFraudWarning(event)
                 "review.opened" -> handleReviewOpened(event)
+                "account.updated" -> handleAccountUpdated(event)
                 else -> logger.info("⚠️ Unhandled webhook type: ${event.type}")
             }
         } catch (e: Exception) {
@@ -133,6 +147,9 @@ class StripeWebhookController(
 
             logger.info("✅ Marked tip ${tip.id} as DISPUTED")
 
+            // Held tip: freeze it (or claw back if it was already released)
+            heldTipService.onDisputeOrReview(tip, "DISPUTE:${dispute.reason}")
+
             tip.sender?.id?.let { senderId ->
                 checkSenderForFraud(senderId)
             }
@@ -187,7 +204,9 @@ class StripeWebhookController(
             else -> null
         }
 
-        if (tip != null) {
+        if (tip != null && heldTipService.onDisputeClosed(tip, won = dispute.status == "won")) {
+            logger.info("✅ Closed dispute for held tip ${tip.id}")
+        } else if (tip != null) {
             tip.status = if (dispute.status == "won") TipStatus.SUCCEEDED else TipStatus.REFUNDED
             tip.updatedAt = Instant.now()
             tipRepository.save(tip)
@@ -223,11 +242,17 @@ class StripeWebhookController(
 
         val tip = tipRepository.findByPaymentIntentId(paymentIntentId)
         if (tip != null) {
-            tip.status = TipStatus.SUCCEEDED
-            tip.chargeId = charge.id
-            tip.updatedAt = Instant.now()
-            tipRepository.save(tip)
-            logger.info("✅ Marked tip ${tip.id} as SUCCEEDED")
+            if (heldTipService.onChargeSucceeded(tip, charge.id)) {
+                // Money is parked for a receiver who hasn't linked a bank.
+                // Still notify them — the app shows the "link bank to collect" banner.
+                logger.info("🅿️ Tip ${tip.id} charge succeeded — HELD until receiver onboards")
+            } else {
+                tip.status = TipStatus.SUCCEEDED
+                tip.chargeId = charge.id
+                tip.updatedAt = Instant.now()
+                tipRepository.save(tip)
+                logger.info("✅ Marked tip ${tip.id} as SUCCEEDED")
+            }
 
             // Stripe has confirmed the charge — now it's safe to notify the receiver
             val receiver = tip.receiver
@@ -266,7 +291,9 @@ class StripeWebhookController(
             else -> tipRepository.findByChargeId(charge.id)
         }
 
-        if (tip != null) {
+        if (tip != null && heldTipService.onChargeRefunded(tip)) {
+            logger.info("✅ Held tip ${tip.id} marked REFUNDED")
+        } else if (tip != null) {
             tip.status = TipStatus.REFUNDED
             tip.updatedAt = Instant.now()
             tipRepository.save(tip)
@@ -294,6 +321,7 @@ class StripeWebhookController(
                 tip.failureReason = paymentIntent.lastPaymentError?.message
                 tip.updatedAt = Instant.now()
                 tipRepository.save(tip)
+                heldTipService.onPaymentFailed(tip, tip.failureReason)
                 logger.info("✅ Marked tip ${tip.id} as FAILED")
             } else {
                 logger.warn("⚠️ Could not find tip for nonce: $tipNonce (likely fixture/test)")
@@ -320,6 +348,7 @@ class StripeWebhookController(
                 tip.failureReason = "Payment canceled"
                 tip.updatedAt = Instant.now()
                 tipRepository.save(tip)
+                heldTipService.onPaymentFailed(tip, "Payment canceled")
                 logger.info("✅ Marked tip ${tip.id} as FAILED (canceled)")
             } else {
                 logger.warn("⚠️ Could not find tip for nonce: $tipNonce (likely fixture/test)")
@@ -359,9 +388,38 @@ class StripeWebhookController(
             tip.fraudType = "stripe_review_${review.reason}"
             tip.updatedAt = Instant.now()
             tipRepository.save(tip)
+            heldTipService.onDisputeOrReview(tip, "REVIEW:${review.reason}")
             logger.info("✅ Flagged tip ${tip.id} for review")
         } else {
             logger.warn("⚠️ Could not find tip for charge: $chargeId (likely fixture/test)")
+        }
+    }
+
+    /**
+     * Connected account changed (typically: receiver just finished onboarding).
+     * Refresh the cached flag and release anything held for them.
+     */
+    private fun handleAccountUpdated(event: Event) {
+        val obj = extractStripeObject(event) ?: return
+        val account = obj as? Account ?: run {
+            logger.warn("⚠️ account.updated but data.object is ${obj.javaClass.name}")
+            return
+        }
+        val user = userRepository.findByStripeAccountId(account.id) ?: run {
+            logger.warn("⚠️ account.updated for unknown account ${account.id}")
+            return
+        }
+        val onboarded = account.chargesEnabled == true && account.payoutsEnabled == true
+        if (user.stripeOnboarded != onboarded) {
+            user.stripeOnboarded   = onboarded
+            user.stripeLastChecked = Instant.now()
+            user.updatedAt         = Instant.now()
+            userRepository.save(user)
+            logger.info("🔄 User ${user.id} onboarded=$onboarded (from account.updated)")
+        }
+        if (onboarded) {
+            val n = heldTipService.releaseForReceiver(user.id)
+            if (n > 0) logger.info("💸 Released $n held tips for ${user.id} after account.updated")
         }
     }
 
