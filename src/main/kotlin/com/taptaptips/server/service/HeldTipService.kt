@@ -21,6 +21,8 @@ import java.security.MessageDigest
 import java.time.Duration
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantLock
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -249,7 +251,30 @@ class HeldTipService(
      * webhook, scheduler): it exits cheaply when nothing is held.
      */
     fun releaseForReceiver(receiverId: UUID): Int {
-        val candidates = heldTips.findAllByReceiverIdAndStatus(receiverId, HeldTipStatus.HELD)
+        // Right after onboarding, the app's status poll AND the account.updated
+        // webhook (and possibly the scheduler) all call this at the same time.
+        // The per-row claim already stops double payment, but the callers used
+        // to SPLIT the tips between them — e.g. 6 + 21 — each sending its own
+        // "Your held tips (N)" push, and the second push replaced the first on
+        // the phone. One release per receiver at a time: a concurrent caller
+        // just returns, and the running one sweeps up everything.
+        val lock = releaseLocks.computeIfAbsent(receiverId) { ReentrantLock() }
+        if (!lock.tryLock()) {
+            log.info("⏭️ Release already running for receiver $receiverId — skipping duplicate trigger")
+            return 0
+        }
+        try {
+            return releaseAllLocked(receiverId)
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    /** Per-receiver guard for releaseForReceiver (single server instance). */
+    private val releaseLocks = ConcurrentHashMap<UUID, ReentrantLock>()
+
+    private fun releaseAllLocked(receiverId: UUID): Int {
+        var candidates = heldTips.findAllByReceiverIdAndStatus(receiverId, HeldTipStatus.HELD)
             .filter { it.chargeId != null }
         if (candidates.isEmpty()) return 0
 
@@ -262,11 +287,18 @@ class HeldTipService(
 
         var releasedNetCents = 0L
         var releasedCount = 0
-        candidates.forEach { h ->
-            if (releaseOne(h.id, accountId)) {
-                releasedCount++
-                releasedNetCents += h.netCents
+        val firstTipId = candidates.first().tip.id
+        // Loop until nothing is left, so a tip whose charge settled while we
+        // were releasing is included in this same batch and notification.
+        while (candidates.isNotEmpty()) {
+            candidates.forEach { h ->
+                if (releaseOne(h.id, accountId)) {
+                    releasedCount++
+                    releasedNetCents += h.netCents
+                }
             }
+            candidates = heldTips.findAllByReceiverIdAndStatus(receiverId, HeldTipStatus.HELD)
+                .filter { it.chargeId != null && it.releaseAttempts == 0 }   // don't spin on failing rows
         }
         if (releasedCount > 0) {
             log.info("💸 Released $releasedCount held tips ($releasedNetCents¢) to receiver $receiverId")
@@ -278,7 +310,7 @@ class HeldTipService(
                     senderId    = receiverId,
                     senderName  = "Your held tips ($releasedCount) are on the way to your bank",
                     amountCents = releasedNetCents,
-                    tipId       = candidates.first().tip.id
+                    tipId       = firstTipId
                 )
             } catch (e: Exception) {
                 log.warn("⚠️ Release notification failed: ${e.message}")
