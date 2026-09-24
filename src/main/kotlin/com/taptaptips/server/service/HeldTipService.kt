@@ -290,11 +290,19 @@ class HeldTipService(
         val firstTipId = candidates.first().tip.id
         // Loop until nothing is left, so a tip whose charge settled while we
         // were releasing is included in this same batch and notification.
-        while (candidates.isNotEmpty()) {
-            candidates.forEach { h ->
-                if (releaseOne(h.id, accountId)) {
-                    releasedCount++
-                    releasedNetCents += h.netCents
+        outer@ while (candidates.isNotEmpty()) {
+            for (h in candidates) {
+                when (releaseOne(h.id, accountId)) {
+                    ReleaseOutcome.RELEASED -> {
+                        releasedCount++
+                        releasedNetCents += h.netCents
+                    }
+                    ReleaseOutcome.FAILED -> Unit
+                    // Stripe says the account can't take transfers right now —
+                    // every other tip would fail the same way. Stop; the tips
+                    // stay HELD and the next trigger (status check, webhook,
+                    // or the scheduler) retries once the account is ready.
+                    ReleaseOutcome.ACCOUNT_NOT_READY -> break@outer
                 }
             }
             candidates = heldTips.findAllByReceiverIdAndStatus(receiverId, HeldTipStatus.HELD)
@@ -319,19 +327,21 @@ class HeldTipService(
         return releasedCount
     }
 
-    private fun releaseOne(heldId: UUID, accountId: String): Boolean {
+    private enum class ReleaseOutcome { RELEASED, FAILED, ACCOUNT_NOT_READY }
+
+    private fun releaseOne(heldId: UUID, accountId: String): ReleaseOutcome {
         val claimed = tx.execute {
             heldTips.transition(heldId, HeldTipStatus.HELD, HeldTipStatus.RELEASING, Instant.now()) == 1
         } ?: false
-        if (!claimed) return false
+        if (!claimed) return ReleaseOutcome.FAILED
 
-        val held = heldTips.findWithTip(heldId) ?: return false
+        val held = heldTips.findWithTip(heldId) ?: return ReleaseOutcome.FAILED
         val tip  = held.tip
 
         integrityProblem(held, tip)?.let { problem ->
             log.error("🚨 INTEGRITY CHECK FAILED for held tip $heldId: $problem — blocking payout")
             block(heldId, HeldTipStatus.RELEASING, "INTEGRITY: $problem")
-            return false
+            return ReleaseOutcome.FAILED
         }
 
         return try {
@@ -345,8 +355,23 @@ class HeldTipService(
                 receiverId           = held.receiverId
             )
             markReleased(heldId, transfer.id, accountId)
-            true
+            ReleaseOutcome.RELEASED
         } catch (e: Exception) {
+            if (isAccountNotReadyError(e)) {
+                // Not the tip's fault — the receiver's Stripe account can't
+                // receive transfers yet (e.g. Stripe needs more info). Put it
+                // back to HELD WITHOUT counting an attempt, so it never gets
+                // BLOCKED for waiting on the receiver's verification.
+                log.warn("⏳ Receiver ${held.receiverId} account $accountId can't take transfers yet: ${e.message}")
+                tx.execute {
+                    val h = heldTips.findById(heldId).orElseThrow()
+                    h.status    = HeldTipStatus.HELD
+                    h.lastError = e.message?.take(1000)
+                    h.updatedAt = Instant.now()
+                    heldTips.save(h)
+                }
+                return ReleaseOutcome.ACCOUNT_NOT_READY
+            }
             tx.execute {
                 val h = heldTips.findById(heldId).orElseThrow()
                 h.releaseAttempts += 1
@@ -356,8 +381,15 @@ class HeldTipService(
                 h.updatedAt = Instant.now()
                 heldTips.save(h)
             }
-            false
+            ReleaseOutcome.FAILED
         }
+    }
+
+    /** Stripe's "destination can't receive transfers yet" family of errors. */
+    private fun isAccountNotReadyError(e: Exception): Boolean {
+        val msg = (e.message ?: "") + " " + (e.cause?.message ?: "")
+        return msg.contains("insufficient_capabilities_for_transfer") ||
+                msg.contains("needs to have at least one of the following capabilities")
     }
 
     private fun markReleased(heldId: UUID, transferId: String, accountId: String) {
