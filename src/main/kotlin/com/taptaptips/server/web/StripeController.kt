@@ -368,8 +368,16 @@ class StripeController(
         
         logger.info("🗑️ Deleting payment method $paymentMethodId for user $userId")
         
-        // Detach from Stripe
-        stripeService.detachPaymentMethod(paymentMethodId)
+        // Only detach cards that belong to this user's Stripe customer
+        when (stripeService.detachPaymentMethodForCustomer(paymentMethodId, user.stripeCustomerId)) {
+            StripePaymentService.DetachResult.NOT_OWNER -> {
+                logger.warn("🚫 User $userId tried to delete payment method $paymentMethodId they don't own")
+                throw ResponseStatusException(HttpStatus.FORBIDDEN, "Payment method not found")
+            }
+            StripePaymentService.DetachResult.ALREADY_GONE ->
+                logger.info("   Payment method already detached/missing — clearing local reference only")
+            StripePaymentService.DetachResult.DETACHED -> Unit
+        }
         
         // If this was the default, clear it
         if (user.defaultPaymentMethodId == paymentMethodId) {

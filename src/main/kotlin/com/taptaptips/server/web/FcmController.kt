@@ -65,7 +65,9 @@ class FcmController(
     fun deleteToken(@RequestParam token: String): ResponseEntity<Any> {
         val fcmToken = fcmTokenRepository.findByToken(token)
 
-        return if (fcmToken != null) {
+        // Only the token's owner may delete it. Someone else's token gets the
+        // same "not_found" reply, so this can't be used to probe for tokens.
+        return if (fcmToken != null && fcmToken.user.id == authUserId()) {
             fcmTokenRepository.delete(fcmToken)
             ResponseEntity.ok(mapOf("status" to "deleted"))
         } else {

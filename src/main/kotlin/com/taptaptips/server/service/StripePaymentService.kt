@@ -1,5 +1,6 @@
 package com.taptaptips.server.service
 
+import com.stripe.exception.InvalidRequestException
 import com.stripe.exception.StripeException
 import com.stripe.model.*
 import com.stripe.net.RequestOptions
@@ -234,13 +235,35 @@ class StripePaymentService(
         }
     }
 
-    fun detachPaymentMethod(paymentMethodId: String) {
+    enum class DetachResult { DETACHED, ALREADY_GONE, NOT_OWNER }
+
+    /**
+     * Detaches a payment method ONLY if it belongs to [customerId].
+     * A card that no longer exists or is already detached counts as
+     * ALREADY_GONE so the user doesn't see an error for a stale list entry.
+     */
+    fun detachPaymentMethodForCustomer(paymentMethodId: String, customerId: String?): DetachResult {
+        val pm = try {
+            PaymentMethod.retrieve(paymentMethodId)
+        } catch (e: InvalidRequestException) {
+            if (e.code == "resource_missing") return DetachResult.ALREADY_GONE
+            logger.error("❌ Failed to retrieve payment method $paymentMethodId", e)
+            throw RuntimeException("Failed to detach payment method: ${e.message}", e)
+        } catch (e: StripeException) {
+            logger.error("❌ Failed to retrieve payment method $paymentMethodId", e)
+            throw RuntimeException("Failed to detach payment method: ${e.message}", e)
+        }
+
+        if (pm.customer == null) return DetachResult.ALREADY_GONE
+        if (customerId == null || pm.customer != customerId) return DetachResult.NOT_OWNER
+
         try {
-            PaymentMethod.retrieve(paymentMethodId).detach()
+            pm.detach()
         } catch (e: StripeException) {
             logger.error("❌ Failed to detach payment method $paymentMethodId", e)
             throw RuntimeException("Failed to detach payment method: ${e.message}", e)
         }
+        return DetachResult.DETACHED
     }
 
     // ── Account deletion helpers ─────────────────────────────────────────────

@@ -25,7 +25,6 @@ import org.springframework.web.server.ResponseStatusException
 import java.security.MessageDigest
 import java.time.Duration
 import java.util.*
-import java.util.concurrent.ConcurrentHashMap
 
 @RestController
 @RequestMapping("/users")
@@ -49,21 +48,10 @@ class UserController(
         val suspendedAt: String?
     )
 
-    companion object {
-        // In-memory cache: endpointId -> userId
-        // TODO: Move to Redis/database for production
-        private val endpointMappings = ConcurrentHashMap<String, UUID>()
-    }
 
     /** Returns the verified caller UUID from the JWT (set by JwtAuthFilter). */
     private fun authUserId(): UUID =
         UUID.fromString(SecurityContextHolder.getContext().authentication.name)
-
-    data class UserLookupResponse(
-        val id: UUID,
-        val username: String,
-        val displayName: String?
-    )
 
     // ============================================
     // Account Deletion (Apple Guideline 5.1.1)
@@ -121,10 +109,6 @@ class UserController(
         // 1. FCM tokens — stop push delivery before anything else
         fcmTokens.deleteByUser_Id(id)
         log.info("   ✓ FCM tokens deleted")
-
-        // 2. BLE token — remove from in-memory discovery map
-        endpointMappings.entries.removeIf { it.value == id }
-        log.info("   ✓ BLE endpoint mappings cleared")
 
         // 3. Devices (Ed25519 public keys)
         val userDevices = devices.findAllByUser_Id(id)
@@ -198,73 +182,6 @@ class UserController(
     data class DeleteAccountRequest(
         val currentPassword: String
     )
-
-    // ============================================
-    // Endpoint registration (BLE discovery)
-    // ============================================
-
-    @PostMapping("/register-endpoint")
-    fun registerEndpoint(
-        @RequestParam endpointId: String,
-        @AuthenticationPrincipal userId: UUID
-    ): ResponseEntity<Map<String, String>> {
-        if (!endpointId.matches(Regex("^BLE-[A-Z0-9]{8}$"))) {
-            throw ResponseStatusException(
-                HttpStatus.BAD_REQUEST,
-                "Invalid endpointId format. Expected: BLE-XXXXXXXX"
-            )
-        }
-
-        users.findById(userId).orElseThrow {
-            ResponseStatusException(HttpStatus.NOT_FOUND, "User not found: $userId")
-        }
-
-        endpointMappings[endpointId] = userId
-
-        return ResponseEntity.ok(mapOf(
-            "status" to "registered",
-            "endpointId" to endpointId,
-            "userId" to userId.toString()
-        ))
-    }
-
-    @GetMapping("/lookup-by-endpoint")
-    fun lookupUserByEndpoint(@RequestParam endpointId: String): ResponseEntity<UserLookupResponse> {
-        val userId = endpointMappings[endpointId]
-            ?: throw ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "No user found for endpoint: $endpointId. User may need to restart their app."
-            )
-
-        val user = users.findById(userId).orElseThrow {
-            endpointMappings.remove(endpointId)
-            ResponseStatusException(HttpStatus.NOT_FOUND, "User not found: $userId")
-        }
-
-        return ResponseEntity.ok()
-            .cacheControl(CacheControl.maxAge(Duration.ofMinutes(5)).cachePublic())
-            .body(UserLookupResponse(
-                id = user.id,
-                username = user.email,
-                displayName = user.displayName
-            ))
-    }
-
-    @DeleteMapping("/endpoint/{endpointId}")
-    fun clearEndpoint(
-        @PathVariable endpointId: String,
-        @AuthenticationPrincipal userId: UUID
-    ): ResponseEntity<Map<String, String>> {
-        val mappedUserId = endpointMappings[endpointId]
-
-        if (mappedUserId != userId) {
-            throw ResponseStatusException(HttpStatus.FORBIDDEN, "Cannot clear endpoint for different user")
-        }
-
-        endpointMappings.remove(endpointId)
-
-        return ResponseEntity.ok(mapOf("status" to "cleared", "endpointId" to endpointId))
-    }
 
     // ============================================
     // Avatar Endpoints
