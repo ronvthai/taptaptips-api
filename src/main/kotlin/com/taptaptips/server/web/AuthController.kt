@@ -3,6 +3,7 @@ package com.taptaptips.server.web
 import com.taptaptips.server.domain.AppUser
 import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.security.JwtService
+import com.taptaptips.server.service.RateLimiterService
 import com.taptaptips.server.service.StripePaymentService
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
@@ -18,9 +19,15 @@ import org.springframework.web.multipart.MultipartFile
 class AuthController(
     private val userRepo: AppUserRepository,
     private val jwt: JwtService,
-    private val stripeService: StripePaymentService
+    private val stripeService: StripePaymentService,
+    private val rateLimiter: RateLimiterService
 ) {
     private val pwd: PasswordEncoder = BCryptPasswordEncoder()
+
+    /** Compared against when the email doesn't exist, so "no such user" takes
+     *  as long as "wrong password" and response timing can't reveal which
+     *  emails are registered. */
+    private val dummyHash: String = pwd.encode("timing-equalizer-not-a-real-password")
     private val logger = LoggerFactory.getLogger(javaClass)
 
     companion object {
@@ -186,24 +193,40 @@ class AuthController(
             ))
         }
 
+        // ── Per-account limit (in addition to the per-IP limit in RateLimitFilter)
+        val emailKey = r.email.trim().lowercase()
+        val acctBucket = rateLimiter.resolveAccountLoginBucket(emailKey)
+        if (acctBucket.availableTokens <= 0) {
+            val retryAfter = acctBucket.estimateAbilityToConsume(1).nanosToWaitForRefill / 1_000_000_000
+            logger.warn("⚠️ Account login limit hit for ${r.email}")
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .header("Retry-After", retryAfter.toString())
+                .body(mapOf(
+                    "error" to "Rate limit exceeded",
+                    "message" to "Too many failed login attempts. Please wait before trying again.",
+                    "retryAfter" to retryAfter,
+                    "retryAfterFormatted" to (if (retryAfter < 60) "$retryAfter seconds" else "${retryAfter / 60} minutes"),
+                    "type" to "login",
+                    "timestamp" to System.currentTimeMillis()
+                ))
+        }
+
         val u = userRepo.findByEmail(r.email)
 
-        if (u == null) {
-            logger.warn("❌ Login failed: User not found - ${r.email}")
+        // Always run one bcrypt check so both failure paths take the same time.
+        val passwordOk = pwd.matches(r.password, u?.passwordHash ?: dummyHash)
+
+        if (u == null || !passwordOk) {
+            acctBucket.tryConsume(1)
+            if (u == null) logger.warn("❌ Login failed: User not found - ${r.email}")
+            else logger.warn("❌ Login failed: Invalid password for ${r.email}")
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(ErrorResponse(
                 error = "Invalid credentials",
                 message = "Incorrect email or password. Please try again."
             ))
         }
 
-        if (!pwd.matches(r.password, u.passwordHash)) {
-            logger.warn("❌ Login failed: Invalid password for ${r.email}")
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(ErrorResponse(
-                error = "Invalid credentials",
-                message = "Incorrect email or password. Please try again."
-            ))
-        }
-
+        rateLimiter.resetAccountLoginBucket(emailKey)
         logger.info("✅ User ${u.id} logged in successfully")
 
         return try {

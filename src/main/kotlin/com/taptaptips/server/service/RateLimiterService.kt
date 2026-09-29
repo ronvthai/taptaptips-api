@@ -26,6 +26,20 @@ class RateLimiterService(
         cacheManager.getCache("rateLimitBuckets")?.evict("login-$ip")
     }
 
+    /**
+     * Login per ACCOUNT: 10 failed attempts per 15 minutes per email,
+     * regardless of IP. Backstop so password guessing against one account
+     * stays slow even if the attacker rotates IPs.
+     */
+    @Cacheable(value = ["rateLimitBuckets"], key = "'login-acct-' + #emailKey")
+    fun resolveAccountLoginBucket(emailKey: String): Bucket = Bucket.builder()
+        .addLimit(Bandwidth.classic(10, Refill.intervally(10, Duration.ofMinutes(15))))
+        .build()
+
+    fun resetAccountLoginBucket(emailKey: String) {
+        cacheManager.getCache("rateLimitBuckets")?.evict("login-acct-$emailKey")
+    }
+
     /** Registration: 3 per 10 minutes per IP. */
     @Cacheable(value = ["rateLimitBuckets"], key = "'register-' + #key")
     fun resolveRegistrationBucket(key: String): Bucket = Bucket.builder()

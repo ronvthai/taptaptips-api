@@ -5,6 +5,7 @@ import jakarta.servlet.FilterChain
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.http.HttpStatus
 import org.springframework.stereotype.Component
 import org.springframework.web.filter.OncePerRequestFilter
@@ -13,7 +14,9 @@ import org.springframework.web.util.ContentCachingResponseWrapper
 @Component
 class RateLimitFilter(
     private val rateLimiterService: RateLimiterService,
-    private val jwt: JwtService
+    private val jwt: JwtService,
+    @Value("\${ratelimit.client-ip-header:CF-Connecting-IP}")
+    private val trustedIpHeader: String
 ) : OncePerRequestFilter() {
 
     private val logger = LoggerFactory.getLogger(javaClass)
@@ -254,15 +257,38 @@ class RateLimitFilter(
         else           -> "${seconds / 3600} hours"
     }
 
+    /**
+     * Client IP for rate limiting. Must NOT come from anything the client can
+     * set: the old code took the FIRST X-Forwarded-For entry, which the client
+     * controls — a fake value per request bypassed every IP-based limit.
+     *
+     * Order:
+     *  1. The trusted header set by our edge proxy (Render sits behind
+     *     Cloudflare, which overwrites CF-Connecting-IP on every request).
+     *     Configurable via `ratelimit.client-ip-header`; set it to blank to
+     *     skip this step if Render's edge ever changes.
+     *  2. The LAST X-Forwarded-For entry — the one appended by the proxy
+     *     closest to us, not by the client.
+     *  3. The socket address.
+     */
     private fun getClientIp(request: HttpServletRequest): String {
-        val xForwardedFor = request.getHeader("X-Forwarded-For")
-        if (!xForwardedFor.isNullOrBlank()) return xForwardedFor.split(",").first().trim()
+        if (trustedIpHeader.isNotBlank()) {
+            val trusted = request.getHeader(trustedIpHeader)?.trim()
+            if (!trusted.isNullOrBlank() && looksLikeIp(trusted)) return trusted
+        }
 
-        val xRealIp = request.getHeader("X-Real-IP")
-        if (!xRealIp.isNullOrBlank()) return xRealIp
+        val xff = request.getHeader("X-Forwarded-For")
+        if (!xff.isNullOrBlank()) {
+            val last = xff.split(",").map { it.trim() }.lastOrNull { it.isNotEmpty() }
+            if (last != null && looksLikeIp(last)) return last
+        }
 
         return request.remoteAddr
     }
+
+    /** Cheap sanity check so junk header values can't become bucket keys. */
+    private fun looksLikeIp(v: String): Boolean =
+        v.length <= 45 && v.all { it.isLetterOrDigit() || it == '.' || it == ':' }
 
     private data class RateLimitInfo(
         val bucket: io.github.bucket4j.Bucket,
