@@ -3,6 +3,7 @@ package com.taptaptips.server.web
 import com.taptaptips.server.domain.AppUser
 import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.security.JwtService
+import com.taptaptips.server.service.DisplayNameModerator
 import com.taptaptips.server.service.RateLimiterService
 import com.taptaptips.server.service.StripePaymentService
 import org.slf4j.LoggerFactory
@@ -20,7 +21,8 @@ class AuthController(
     private val userRepo: AppUserRepository,
     private val jwt: JwtService,
     private val stripeService: StripePaymentService,
-    private val rateLimiter: RateLimiterService
+    private val rateLimiter: RateLimiterService,
+    private val nameModerator: DisplayNameModerator
 ) {
     private val pwd: PasswordEncoder = BCryptPasswordEncoder()
 
@@ -74,6 +76,15 @@ class AuthController(
             return ResponseEntity.badRequest().body(ErrorResponse(
                 error = "Display name too long",
                 message = "Display name must be at most $MAX_DISPLAY_NAME_LENGTH characters"
+            ))
+        }
+        // ── Word filter ──────────────────────────────────────────────────────
+        val nameCheck = nameModerator.check(displayName)
+        if (nameCheck is DisplayNameModerator.Result.Blocked) {
+            logger.warn("🚫 Registration rejected: display name matched '${nameCheck.term}'")
+            return ResponseEntity.badRequest().body(ErrorResponse(
+                error = nameModerator.rejectionMessage,
+                message = nameModerator.rejectionMessage
             ))
         }
         if (password.length > MAX_PASSWORD_LENGTH) {
@@ -140,6 +151,9 @@ class AuthController(
             ))
 
             logger.info("✅ Created user ${u.id} (with avatar, ${avatar.size} bytes)")
+            if (nameCheck is DisplayNameModerator.Result.Review) {
+                nameModerator.flag(u.id, u.displayName, nameCheck.term)
+            }
 
             var stripeOnboardingUrl: String? = null
             if (wantsToReceiveTips) {

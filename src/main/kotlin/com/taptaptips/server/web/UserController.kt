@@ -7,6 +7,7 @@ import com.taptaptips.server.repo.FcmTokenRepository
 import com.taptaptips.server.repo.PasswordResetTokenRepository
 import com.taptaptips.server.repo.TipRepository
 import com.taptaptips.server.repo.HeldTipRepository
+import com.taptaptips.server.service.DisplayNameModerator
 import com.taptaptips.server.service.HeldTipService
 import com.taptaptips.server.service.StripePaymentService
 import org.slf4j.LoggerFactory
@@ -37,7 +38,8 @@ class UserController(
     private val tips: TipRepository,
     private val stripeService: StripePaymentService,
     private val heldTipService: HeldTipService,
-    private val heldTips: HeldTipRepository
+    private val heldTips: HeldTipRepository,
+    private val nameModerator: DisplayNameModerator
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     private val encoder = BCryptPasswordEncoder()
@@ -359,6 +361,16 @@ class UserController(
         if (body.displayName != null && body.displayName.length > 100) {
             return ResponseEntity.badRequest().body(mapOf("error" to "Display name too long (max 100 chars)"))
         }
+        if (body.displayName != null && body.displayName.isBlank()) {
+            return ResponseEntity.badRequest().body(mapOf("error" to "Please enter a display name"))
+        }
+
+        // ── Word filter ──────────────────────────────────────────────────────
+        val nameCheck = body.displayName?.let { nameModerator.check(it) }
+        if (nameCheck is DisplayNameModerator.Result.Blocked) {
+            log.warn("🚫 Name change rejected for $id: matched '${nameCheck.term}'")
+            return ResponseEntity.badRequest().body(mapOf("error" to nameModerator.rejectionMessage))
+        }
 
         // ── Password change requires current password ────────────────────────
         val u = users.findById(id).orElseThrow()
@@ -397,7 +409,7 @@ class UserController(
             id           = u.id,
             email        = body.email ?: u.email,
             passwordHash = body.password?.let { encoder.encode(it) } ?: u.passwordHash,
-            displayName  = body.displayName ?: u.displayName,
+            displayName  = body.displayName?.trim() ?: u.displayName,
             createdAt    = u.createdAt,
             updatedAt    = java.time.Instant.now(),
             profilePicture = u.profilePicture,
@@ -412,6 +424,9 @@ class UserController(
         )
 
         users.save(newEntity)
+        if (nameCheck is DisplayNameModerator.Result.Review) {
+            nameModerator.flag(id, newEntity.displayName, nameCheck.term)
+        }
         return ResponseEntity.ok(mapOf("status" to "OK"))
     }
 }

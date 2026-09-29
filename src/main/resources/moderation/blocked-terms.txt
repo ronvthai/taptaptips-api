@@ -1,0 +1,71 @@
+# Display name filter — starter list.
+#
+# Only used to fill the blocked_term table the FIRST time the server starts
+# with an empty table. After that, manage the list in pgAdmin (table
+# blocked_term); changes are picked up within 5 minutes.
+#
+# Format:  term | action | match | note
+#   action: BLOCK (reject), REVIEW (accept + flag for you), ALLOW (never bad)
+#   match:  WORD (whole word only)  or  CONTAINS (anywhere, even inside words)
+# Defaults if omitted: BLOCK, WORD.
+#
+# Tip: append a full profanity list (e.g. the open-source LDNOOBW English
+# list) below as plain lines — each line becomes a BLOCK / WORD entry.
+
+# ── Impersonation ───────────────────────────────────────────────────────
+taptaptips        | BLOCK | CONTAINS | impersonation
+tap tap tips      | BLOCK | WORD     | impersonation
+admin             | BLOCK | WORD     | impersonation
+administrator     | BLOCK | WORD     | impersonation
+support           | BLOCK | WORD     | impersonation
+customer service  | BLOCK | WORD     | impersonation
+help desk         | BLOCK | WORD     | impersonation
+official          | BLOCK | WORD     | impersonation
+moderator         | BLOCK | WORD     | impersonation
+staff             | REVIEW| WORD     | impersonation (could be a real job title)
+stripe            | REVIEW| WORD     | impersonation
+
+# ── Payment-app / scam bait ────────────────────────────────────────────
+cash app          | BLOCK | WORD     | scam
+cashapp           | BLOCK | WORD     | scam
+venmo             | BLOCK | WORD     | scam
+zelle             | BLOCK | WORD     | scam
+paypal            | BLOCK | WORD     | scam
+send money        | BLOCK | WORD     | scam
+free money        | BLOCK | WORD     | scam
+gift card         | BLOCK | WORD     | scam
+giveaway          | BLOCK | WORD     | scam
+bitcoin           | REVIEW| WORD     | scam
+crypto            | REVIEW| WORD     | scam
+whatsapp          | BLOCK | WORD     | scam (moves users off-platform)
+telegram          | BLOCK | WORD     | scam (moves users off-platform)
+
+# ── Profanity (severe → CONTAINS, milder → WORD) ───────────────────────
+fuck              | BLOCK | CONTAINS | profanity
+cunt              | BLOCK | CONTAINS | profanity
+shit              | BLOCK | WORD     | profanity
+bullshit          | BLOCK | WORD     | profanity
+bitch             | BLOCK | WORD     | profanity
+asshole           | BLOCK | WORD     | profanity
+ass               | BLOCK | WORD     | profanity
+bastard           | BLOCK | WORD     | profanity
+whore             | BLOCK | WORD     | profanity
+slut              | BLOCK | WORD     | profanity
+cock              | BLOCK | WORD     | profanity
+pussy             | BLOCK | WORD     | profanity
+boob              | BLOCK | WORD     | profanity
+boobs             | BLOCK | WORD     | profanity
+porn              | BLOCK | WORD     | sexual
+nude              | BLOCK | WORD     | sexual
+nudes             | BLOCK | WORD     | sexual
+onlyfans          | BLOCK | WORD     | sexual
+dick              | REVIEW| WORD     | profanity (also a real first name)
+damn              | REVIEW| WORD     | mild
+
+# ── Allow-list: real names/places that contain a blocked word ──────────
+scunthorpe        | ALLOW
+dickson           | ALLOW
+dickens           | ALLOW
+hancock           | ALLOW
+cockburn          | ALLOW
+peacock           | ALLOW
