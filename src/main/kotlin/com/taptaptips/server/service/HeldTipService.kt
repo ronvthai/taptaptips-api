@@ -345,6 +345,14 @@ class HeldTipService(
         }
 
         return try {
+            // Already paid? (A previous attempt may have succeeded at Stripe
+            // without our DB recording it.) Never pay the same tip twice.
+            stripe.findTransferByGroup(held.transferGroup)?.let { existing ->
+                log.warn("🔧 Held tip $heldId already has transfer ${existing.id} — marking released")
+                markReleased(heldId, existing.id, existing.destination ?: accountId)
+                return ReleaseOutcome.RELEASED
+            }
+
             val transfer = stripe.createHeldTipTransfer(
                 netCents             = held.netCents,
                 destinationAccountId = accountId,

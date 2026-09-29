@@ -572,7 +572,12 @@ class StripePaymentService(
                     .putMetadata("tip_id",      tipId.toString())
                     .putMetadata("receiver_id", receiverId.toString())
                     .build(),
-                idempotent("held-tip-transfer-$heldTipId")
+                // Key changes every hour. Stripe replays a key's FIRST result
+                // for 24h — including a failure — so a fixed key kept
+                // returning "insufficient capabilities" long after the
+                // receiver's account became ready. Double payment is prevented
+                // by the transfer-group check in HeldTipService.releaseOne.
+                idempotent("held-tip-transfer-$heldTipId-${Instant.now().epochSecond / 3600}")
             )
         } catch (e: StripeException) {
             logger.error("❌ Held-tip transfer failed for $heldTipId: ${e.message}")
