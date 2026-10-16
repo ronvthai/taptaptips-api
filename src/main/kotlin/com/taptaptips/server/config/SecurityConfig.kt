@@ -52,6 +52,10 @@ class SecurityConfig(
                     // Public endpoint — mobile app fetches the Stripe publishable key
                     // before presenting payment UI, with no auth token available yet.
                     .requestMatchers(HttpMethod.GET, "/stripe/config").permitAll()
+                    // Referral program: "is it on?" (sign-up screen, before login)
+                    // and the landing page referral QR codes open (/r/CODE).
+                    .requestMatchers(HttpMethod.GET, "/referrals/config").permitAll()
+                    .requestMatchers(HttpMethod.GET, "/r/**").permitAll()
                     .anyRequest().authenticated()
             }
             .addFilterBefore(rateLimitFilter, UsernamePasswordAuthenticationFilter::class.java)

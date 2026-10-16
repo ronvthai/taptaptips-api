@@ -14,6 +14,7 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder
 import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.multipart.MultipartFile
+import com.taptaptips.server.service.ReferralService
 
 @RestController
 @RequestMapping("/auth")
@@ -22,7 +23,8 @@ class AuthController(
     private val jwt: JwtService,
     private val stripeService: StripePaymentService,
     private val rateLimiter: RateLimiterService,
-    private val nameModerator: DisplayNameModerator
+    private val nameModerator: DisplayNameModerator,
+    private val referralService: ReferralService
 ) {
     private val pwd: PasswordEncoder = BCryptPasswordEncoder()
 
@@ -55,7 +57,8 @@ class AuthController(
         @RequestParam password: String,
         @RequestParam displayName: String,
         @RequestParam(defaultValue = "false") wantsToReceiveTips: Boolean,
-        @RequestParam("avatar") avatar: MultipartFile
+        @RequestParam("avatar") avatar: MultipartFile,
+        @RequestParam(required = false) referralCode: String?
     ): ResponseEntity<Any> {
         logger.info("📝 Registration: email=$email, wantsToReceiveTips=$wantsToReceiveTips")
 
@@ -151,6 +154,12 @@ class AuthController(
             ))
 
             logger.info("✅ Created user ${u.id} (with avatar, ${avatar.size} bytes)")
+            // Referral: a bad or expired code never blocks sign-up — it's just ignored.
+            val referralError = referralCode?.takeIf { it.isNotBlank() }
+                ?.let { referralService.applyCode(u, it) }
+            if (referralError != null) {
+                logger.info("ℹ️ Referral code not applied for ${u.id}: $referralError")
+            }
             if (nameCheck is DisplayNameModerator.Result.Review) {
                 nameModerator.flag(u.id, u.displayName, nameCheck.term)
             }

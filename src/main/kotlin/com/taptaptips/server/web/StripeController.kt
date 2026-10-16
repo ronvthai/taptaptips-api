@@ -2,6 +2,7 @@ package com.taptaptips.server.web
 
 import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.service.HeldTipService
+import com.taptaptips.server.service.ReferralService
 import com.taptaptips.server.service.StripePaymentService
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
@@ -18,6 +19,7 @@ class StripeController(
     private val stripeService: StripePaymentService,
     private val userRepository: AppUserRepository,
     private val heldTipService: HeldTipService,
+    private val referralService: ReferralService,
     @Value("\${stripe.publishable.key}")
     private val stripePublishableKey: String
 ) {
@@ -311,6 +313,10 @@ class StripeController(
             user.stripeCustomerId!!,
             user
         )
+        
+        // Referral: friend added a card → referrer may now earn their reward.
+        // Never throws — a referral problem can't break adding a card.
+        referralService.onCardAdded(user, paymentMethod)
         
         logger.info("✅ Payment method confirmed and saved")
         
