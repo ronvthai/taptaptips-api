@@ -74,11 +74,11 @@ class StripePaymentService(
                     )
                     .setBusinessProfile(
                         AccountCreateParams.BusinessProfile.builder()
-                            // 7299 = Miscellaneous Personal Services. Not on any
-                            // network cash-advance list. Aligns with the platform
-                            // MCC so issuer risk models see a consistent merchant
-                            // category between platform and connected account.
-                            .setMcc("7299")
+                            // No MCC set here: 7299 is on Stripe's restricted list,
+                            // and Stripe assigns/locks Express MCCs itself after
+                            // review. Tips are charged on the PLATFORM (no
+                            // on_behalf_of), so the receiver's MCC never reaches
+                            // the tipper's card — see createPaymentIntent*.
                             .setProductDescription("In-person cashless tip from a customer to a service provider via TapTapTips marketplace")
                             .setUrl("https://taptaptips.com")
                             .build()
@@ -385,12 +385,12 @@ class StripePaymentService(
                             .setDestination(receiverStripeAccountId)
                             .build()
                     )
-                    // on_behalf_of makes the connected account the "merchant of
-                    // record" for processing purposes (settlement currency,
-                    // regulatory jurisdiction) while the platform descriptor
-                    // still shows on cardholder statements. Recommended by
-                    // Stripe for marketplace destination charges.
-                    .setOnBehalfOf(receiverStripeAccountId)
+                    // NO on_behalf_of: the PLATFORM is the merchant on the
+                    // charge, so the card network sees TapTapTips' MCC (a normal
+                    // purchase) — not the receiver's. Stripe assigned some
+                    // receivers MCC 4829 (Money Orders / Wire Transfers), which
+                    // made card issuers charge tippers cash-advance fees.
+                    // The tip still goes to the receiver via transfer_data.
                     .putMetadata("sender_id",          senderId.toString())
                     .putMetadata("receiver_id",        receiverId.toString())
                     .putMetadata("tip_nonce",          tipNonce)
@@ -436,10 +436,10 @@ class StripePaymentService(
                     .setPaymentMethod(paymentMethodId)
                     // confirm intentionally omitted (defaults to false)
                     .setApplicationFeeAmount(applicationFeeCents)
-                    // See createPaymentIntentWithSavedMethod for rationale on
-                    // suffix, description, and on_behalf_of. These three fields
-                    // together signal to issuers that this is a marketplace
-                    // tip, not a P2P transfer, reducing cash-advance flags.
+                    // See createPaymentIntentWithSavedMethod: suffix + description
+                    // mark this as a tip, and there is deliberately NO
+                    // on_behalf_of, so the platform's MCC (not the receiver's,
+                    // which may be 4829) is what the card network sees.
                     .setStatementDescriptorSuffix("TIP")
                     .setDescription("TapTapTips in-person tip to service provider")
                     .setTransferData(
@@ -447,7 +447,6 @@ class StripePaymentService(
                             .setDestination(receiverStripeAccountId)
                             .build()
                     )
-                    .setOnBehalfOf(receiverStripeAccountId)
                     .putMetadata("sender_id",          senderId.toString())
                     .putMetadata("receiver_id",        receiverId.toString())
                     .putMetadata("tip_nonce",          tipNonce)
