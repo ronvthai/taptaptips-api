@@ -31,8 +31,7 @@ class ReferralSchema(private val jdbc: JdbcTemplate) {
 
     @Volatile
     var ready: Boolean = false
-        private set
-
+            protected set
     @EventListener(ApplicationReadyEvent::class)
     fun ensure() {
         try {
