@@ -22,12 +22,13 @@ class ReferralCode(
 /**
  * Lifecycle of one referral:
  *
- *   PENDING ──new user adds a card──▶ QUALIFIED ──payout delay passes──▶ PAYING ──▶ PAID
- *      │                                  │
- *      └─ fraud check fails ─▶ REJECTED   └─ referrer over monthly cap ─▶ CAPPED (no reward)
+ *   PENDING ──new user's tip is charged──▶ QUALIFIED ──payout delay + tip SUCCEEDED──▶ PAYING ──▶ PAID
+ *      │                                       │
+ *      └─ fraud check fails ─▶ REJECTED        ├─ referrer over monthly cap ─▶ CAPPED (no reward)
+ *                                              └─ qualifying tip refunded/disputed ─▶ REJECTED
  *
- * QUALIFIED rows wait until the referrer has a transfer-ready Stripe account,
- * then the scheduler pays them.
+ * QUALIFIED rows wait until the referrer has a transfer-ready Stripe account
+ * and the qualifying tip has reached the receiver, then the scheduler pays them.
  */
 enum class ReferralStatus { PENDING, QUALIFIED, PAYING, PAID, REJECTED, CAPPED }
 
@@ -61,9 +62,17 @@ class Referral(
     @Column(name = "reward_cents", nullable = false)
     val rewardCents: Long,
 
-    /** Stripe card fingerprint of the new user's first card — same physical card = same value. */
+    /**
+     * Stripe card fingerprint of the card that paid the qualifying tip — same
+     * physical card = same value. Partial UNIQUE index over QUALIFIED/PAYING/PAID
+     * rows (created by ReferralSchema) makes "one reward per card" race-proof.
+     */
     @Column(name = "card_fingerprint", length = 64)
     var cardFingerprint: String? = null,
+
+    /** The tip that qualified this referral. Null on rows qualified under the old card-only rule. */
+    @Column(name = "qualifying_tip_id")
+    var qualifyingTipId: UUID? = null,
 
     @Column(name = "reject_reason", length = 100)
     var rejectReason: String? = null,

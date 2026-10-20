@@ -3,7 +3,7 @@ package com.taptaptips.server.service
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.Message
 import com.google.firebase.messaging.Notification
-import com.stripe.exception.StripeException
+import com.stripe.model.Charge
 import com.stripe.model.PaymentMethod
 import com.stripe.model.Transfer
 import com.stripe.net.RequestOptions
@@ -14,18 +14,23 @@ import com.taptaptips.server.domain.AppUser
 import com.taptaptips.server.domain.Referral
 import com.taptaptips.server.domain.ReferralCode
 import com.taptaptips.server.domain.ReferralStatus
+import com.taptaptips.server.domain.Tip
+import com.taptaptips.server.domain.TipStatus
 import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.repo.DeviceRepository
 import com.taptaptips.server.repo.FcmTokenRepository
 import com.taptaptips.server.repo.ReferralCodeRepository
 import com.taptaptips.server.repo.ReferralRepository
+import com.taptaptips.server.repo.TipRepository
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Service
 import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.TransactionDefinition
 import org.springframework.transaction.support.TransactionTemplate
+import java.math.BigDecimal
 import java.security.SecureRandom
 import java.time.Duration
 import java.time.Instant
@@ -33,16 +38,29 @@ import java.util.UUID
 
 /**
  * Referral program: the referrer earns cash when someone they invited creates
- * an account AND adds a real payment card.
+ * an account AND sends a real tip of at least [minTipCents] to someone other
+ * than the referrer (or another person the referrer invited).
+ *
+ * Why a tip and not "added a card": adding a card costs nothing and can be
+ * undone right away, and virtual-card services hand out unlimited card
+ * numbers. A real charge costs the friend real money that goes to a third
+ * party, so faking sign-ups stops paying once [minTipCents] >= [rewardCents].
  *
  * Abuse protection:
  *  - A code can only be applied to a brand-new account (within [applyWindow]).
+ *  - The qualifying tip can't go to the referrer, or to anyone else the
+ *    referrer invited (that money would just loop back to the same person).
  *  - No self-referral: the new account can't share a device key or a card with
  *    the referrer.
- *  - One reward per physical card (Stripe card fingerprint), ever.
- *  - Monthly cap per referrer ([monthlyCap]); extra referrals are recorded as CAPPED.
- *  - Payout waits [payoutDelay] after qualifying, so mass sign-ups can be spotted
- *    and rejected (set status = 'REJECTED' in the database) before money moves.
+ *  - One reward per physical card (Stripe card fingerprint), ever. Enforced by
+ *    a partial UNIQUE index in the database ([ReferralSchema]), so two
+ *    accounts qualifying with the same card at the same instant can't both win.
+ *  - Monthly cap per referrer ([monthlyCap]); extra referrals are recorded as
+ *    CAPPED. The referrer's code row is locked while counting, so a burst of
+ *    simultaneous qualifications can't overshoot the cap.
+ *  - Payout waits [payoutDelay] after qualifying, AND only happens once the
+ *    qualifying tip has actually SUCCEEDED (not still HELD, refunded, failed
+ *    or disputed). A reversed tip rejects the referral.
  *  - Suspended accounts never earn or trigger rewards.
  *
  * Money safety mirrors held tips: atomic status claims, a transfer-group check
@@ -60,8 +78,9 @@ import java.util.UUID
  *   referral.payoutsPaused        false
  *   referral.qualifyWindowDays    30
  *   referral.rewardCents          500
+ *   referral.minTipCents          500     (keep >= rewardCents)
  *   referral.monthlyCap           50
- *   referral.payoutDelayHours     24
+ *   referral.payoutDelayHours     168     (7 days — refunds/disputes surface first)
  *   referral.applyWindowHours     24
  *   referral.shareUrl             https://taptaptips.com
  */
@@ -72,15 +91,18 @@ class ReferralService(
     private val users: AppUserRepository,
     private val devices: DeviceRepository,
     private val fcmTokens: FcmTokenRepository,
+    private val tips: TipRepository,
     private val stripe: StripePaymentService,
+    private val schema: ReferralSchema,
     txManager: PlatformTransactionManager,
 
     @Value("\${referral.enabled:false}") private val enabled: Boolean,
     @Value("\${referral.payoutsPaused:false}") private val payoutsPaused: Boolean,
     @Value("\${referral.qualifyWindowDays:30}") private val qualifyWindowDays: Long,
     @Value("\${referral.rewardCents:500}") private val rewardCents: Long,
+    @Value("\${referral.minTipCents:500}") private val minTipCents: Long,
     @Value("\${referral.monthlyCap:50}") private val monthlyCap: Long,
-    @Value("\${referral.payoutDelayHours:24}") private val payoutDelayHours: Long,
+    @Value("\${referral.payoutDelayHours:168}") private val payoutDelayHours: Long,
     @Value("\${referral.applyWindowHours:24}") private val applyWindowHours: Long,
     @Value("\${referral.shareUrl:https://taptaptips.com}") private val shareUrl: String
 ) {
@@ -101,6 +123,17 @@ class ReferralService(
         private val REWARDED = listOf(ReferralStatus.QUALIFIED, ReferralStatus.PAYING, ReferralStatus.PAID)
         private val STUCK_AFTER: Duration = Duration.ofMinutes(15)
         private const val MAX_PAY_ATTEMPTS = 10
+        /** Tip states that mean the money went back to the sender (or may). */
+        private val REVERSED_TIP = setOf(TipStatus.FAILED, TipStatus.REFUNDED, TipStatus.DISPUTED)
+    }
+
+    init {
+        if (minTipCents < rewardCents) {
+            log.warn(
+                "⚠️ referral.minTipCents ($minTipCents) is below referral.rewardCents ($rewardCents) — " +
+                        "fake sign-ups that tip a stranger can still turn a profit."
+            )
+        }
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -120,9 +153,9 @@ class ReferralService(
     }
 
     /** What the apps need to decide whether to show the program at all. */
-    data class PublicConfig(val enabled: Boolean, val rewardCents: Long, val monthlyCap: Long)
+    data class PublicConfig(val enabled: Boolean, val rewardCents: Long, val monthlyCap: Long, val minTipCents: Long)
 
-    fun publicConfig() = PublicConfig(enabled, rewardCents, monthlyCap)
+    fun publicConfig() = PublicConfig(enabled, rewardCents, monthlyCap, minTipCents)
 
     data class Summary(
         val enabled: Boolean,
@@ -131,7 +164,9 @@ class ReferralService(
         val shareLink: String,
         val shareMessage: String,
         val rewardCents: Long,
-        val pendingCount: Long,      // signed up, no card yet
+        /** A friend's first tip must be at least this much to count. */
+        val minTipCents: Long,
+        val pendingCount: Long,      // signed up, no qualifying tip yet
         val waitingCount: Long,      // qualified, payout coming
         val paidCount: Long,
         val earnedCents: Long,
@@ -150,6 +185,7 @@ class ReferralService(
             shareMessage = "Tip people nearby with a tap — no cash needed. " +
                     "Join me on TapTapTips with my code $code: ${shareLinkFor(code)}",
             rewardCents = rewardCents,
+            minTipCents = minTipCents,
             pendingCount = referrals.countByReferrerIdAndStatus(userId, ReferralStatus.PENDING),
             waitingCount = referrals.countByReferrerIdAndStatus(userId, ReferralStatus.QUALIFIED) +
                     referrals.countByReferrerIdAndStatus(userId, ReferralStatus.PAYING),
@@ -201,78 +237,139 @@ class ReferralService(
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // Qualifying (new user added a card)
+    // Qualifying (new user's tip was charged)
     // ════════════════════════════════════════════════════════════════════════
 
     /**
-     * Called after a user successfully saves a card. Cheap no-op for users who
-     * weren't referred or already qualified. Never throws — a referral problem
-     * must not break adding a card.
+     * Called from the Stripe webhook after a tip's charge succeeds (whether the
+     * tip went straight to the receiver or is HELD for them). Cheap no-op for
+     * senders who weren't referred or already qualified. Never throws — a
+     * referral problem must not break tip processing.
+     *
+     * A tip that doesn't count (too small, sent to the referrer, no card
+     * fingerprint, Stripe hiccup) leaves the referral PENDING, so the friend's
+     * next real tip can still qualify it.
      */
-    fun onCardAdded(user: AppUser, paymentMethod: PaymentMethod) {
+    fun onTipCharged(tip: Tip, charge: Charge) {
         try {
-            val ref = referrals.findByReferredUserId(user.id) ?: return
+            val sender = tip.sender ?: return
+            val ref = referrals.findByReferredUserId(sender.id) ?: return
             if (ref.status != ReferralStatus.PENDING) return
-            qualify(ref, user, paymentMethod.card?.fingerprint)
+
+            if (!schema.ready) {
+                // Without the unique index the one-card-one-reward rule can be
+                // raced. Fail closed: leave PENDING, the next tip retries.
+                log.error("🚫 Referral ${ref.id} not qualified: ${ReferralSchema.INDEX_NAME} is missing (see startup log)")
+                return
+            }
+
+            val tipCents = tip.amount.multiply(BigDecimal(100)).toLong()
+            if (tipCents < minTipCents) {
+                log.info("ℹ️ Referral ${ref.id}: tip ${tip.id} is ${tipCents}¢, below ${minTipCents}¢ — still pending")
+                return
+            }
+
+            val receiverId = tip.receiver?.id ?: return
+            if (receiverId == ref.referrerId) {
+                log.info("ℹ️ Referral ${ref.id}: tip ${tip.id} went to the referrer — doesn't count")
+                return
+            }
+            if (referrals.findByReferredUserId(receiverId)?.referrerId == ref.referrerId) {
+                log.info("ℹ️ Referral ${ref.id}: tip ${tip.id} went to another of the referrer's invitees — doesn't count")
+                return
+            }
+
+            val fingerprint = charge.paymentMethodDetails?.card?.fingerprint
+            if (fingerprint == null) {
+                // Link, bank debit, etc. — nothing to de-duplicate on. Wait for a card tip.
+                log.info("ℹ️ Referral ${ref.id}: tip ${tip.id} wasn't paid by card — still pending")
+                return
+            }
+
+            qualify(ref, sender, tip, fingerprint)
         } catch (e: Exception) {
-            log.error("Referral check after card add failed for ${user.id}", e)
+            log.error("Referral check after tip ${tip.id} failed", e)
         }
     }
 
-    private fun qualify(ref: Referral, newUser: AppUser, fingerprint: String?) {
+    private fun qualify(ref: Referral, newUser: AppUser, tip: Tip, fingerprint: String) {
         val referrer = users.findById(ref.referrerId).orElse(null)
 
+        // Checks that need Stripe or several reads. Stripe errors throw out of
+        // here (caught in onTipCharged), leaving the referral PENDING.
         val rejection: String? = when {
             ref.createdAt.isBefore(Instant.now().minus(Duration.ofDays(qualifyWindowDays))) -> "QUALIFY_WINDOW_EXPIRED"
             referrer == null -> "REFERRER_DELETED"
             referrer.suspended || newUser.suspended -> "ACCOUNT_SUSPENDED"
-            fingerprint == null -> "NO_CARD_FINGERPRINT"
-            referrals.cardAlreadyRewarded(fingerprint, REWARDED, ref.id) -> "CARD_ALREADY_REWARDED"
             referrerHasCard(referrer, fingerprint) -> "SELF_REFERRAL_CARD"
             sharesDevice(referrer.id, newUser.id) -> "SELF_REFERRAL_DEVICE"
             else -> null
         }
 
-        tx.execute {
-            val r = referrals.findById(ref.id).orElseThrow()
-            if (r.status != ReferralStatus.PENDING) return@execute
-            r.cardFingerprint = fingerprint
-            r.updatedAt = Instant.now()
-            when {
-                rejection != null -> {
+        try {
+            tx.execute {
+                // Serialize everything for this referrer: the cap count below
+                // can't be raced by a burst of simultaneous qualifications.
+                codes.lockByUserId(ref.referrerId)
+
+                val r = referrals.findById(ref.id).orElseThrow()
+                if (r.status != ReferralStatus.PENDING) return@execute
+                r.cardFingerprint = fingerprint
+                r.qualifyingTipId = tip.id
+                r.updatedAt = Instant.now()
+
+                val reason = rejection
+                    ?: if (referrals.cardAlreadyRewarded(fingerprint, REWARDED, r.id)) "CARD_ALREADY_REWARDED" else null
+
+                when {
+                    reason != null -> {
+                        r.status = ReferralStatus.REJECTED
+                        r.rejectReason = reason
+                        log.warn("🚫 Referral ${r.id} rejected: $reason")
+                    }
+                    referrals.countRewardsSince(r.referrerId, REWARDED, Instant.now().minus(Duration.ofDays(30))) >= monthlyCap -> {
+                        r.status = ReferralStatus.CAPPED
+                        r.rejectReason = "MONTHLY_CAP"
+                        log.info("🧢 Referral ${r.id} over monthly cap for ${r.referrerId}")
+                    }
+                    else -> {
+                        r.status = ReferralStatus.QUALIFIED
+                        r.qualifiedAt = Instant.now()
+                        log.info("✅ Referral ${r.id} qualified by tip ${tip.id} — referrer ${r.referrerId} earns ${r.rewardCents}¢")
+                    }
+                }
+                // Flush now so a unique-index violation surfaces here, inside
+                // the transaction, rather than at commit.
+                referrals.saveAndFlush(r)
+            }
+        } catch (e: DataIntegrityViolationException) {
+            // ux_referral_card_rewarded: another referral with this card
+            // qualified at the same moment (and won). This one gets nothing.
+            tx.execute {
+                val r = referrals.findById(ref.id).orElseThrow()
+                if (r.status == ReferralStatus.PENDING) {
                     r.status = ReferralStatus.REJECTED
-                    r.rejectReason = rejection
-                    log.warn("🚫 Referral ${r.id} rejected: $rejection")
-                }
-                referrals.countRewardsSince(r.referrerId, REWARDED, Instant.now().minus(Duration.ofDays(30))) >= monthlyCap -> {
-                    r.status = ReferralStatus.CAPPED
-                    r.rejectReason = "MONTHLY_CAP"
-                    log.info("🧢 Referral ${r.id} over monthly cap for ${r.referrerId}")
-                }
-                else -> {
-                    r.status = ReferralStatus.QUALIFIED
-                    r.qualifiedAt = Instant.now()
-                    log.info("✅ Referral ${r.id} qualified — referrer ${r.referrerId} earns ${r.rewardCents}¢")
+                    r.rejectReason = "CARD_ALREADY_REWARDED"
+                    r.cardFingerprint = fingerprint
+                    r.qualifyingTipId = tip.id
+                    r.updatedAt = Instant.now()
+                    referrals.save(r)
                 }
             }
-            referrals.save(r)
+            log.warn("🚫 Referral ${ref.id} rejected: CARD_ALREADY_REWARDED (lost a race on the same card)")
         }
     }
 
+    /** Throws on Stripe errors so the caller leaves the referral PENDING (fail closed). */
     private fun referrerHasCard(referrer: AppUser, fingerprint: String): Boolean {
         val customerId = referrer.stripeCustomerId ?: return false
-        return try {
-            PaymentMethod.list(
-                PaymentMethodListParams.builder()
-                    .setCustomer(customerId)
-                    .setType(PaymentMethodListParams.Type.CARD)
-                    .setLimit(100L)
-                    .build()
-            ).data.any { it.card?.fingerprint == fingerprint }
-        } catch (e: StripeException) {
-            log.warn("Could not list referrer cards for ${referrer.id}: ${e.message}")
-            false
-        }
+        return PaymentMethod.list(
+            PaymentMethodListParams.builder()
+                .setCustomer(customerId)
+                .setType(PaymentMethodListParams.Type.CARD)
+                .setLimit(100L)
+                .build()
+        ).data.any { it.card?.fingerprint == fingerprint }
     }
 
     /** Same app install (device signing key) on both accounts = same phone. */
@@ -299,11 +396,48 @@ class ReferralService(
         }
     }
 
+    /**
+     * Re-checks a QUALIFIED referral right before paying.
+     * Returns null = OK to pay, "WAIT" = not yet, anything else = reject reason.
+     */
+    private fun payoutBlocker(ref: Referral): String? {
+        val friend = users.findById(ref.referredUserId).orElse(null) ?: return "REFERRED_USER_DELETED"
+        if (friend.suspended) return "ACCOUNT_SUSPENDED"
+
+        val tipId = ref.qualifyingTipId
+            ?: return null.also { log.warn("⚠️ Referral ${ref.id} qualified under the old card-only rule — paying as promised") }
+        val tip = tips.findById(tipId).orElse(null) ?: return "QUALIFYING_TIP_MISSING"
+        return when {
+            tip.status == TipStatus.SUCCEEDED -> null
+            tip.status in REVERSED_TIP -> "QUALIFYING_TIP_${tip.status}"
+            else -> "WAIT" // PENDING / HELD — money hasn't reached the receiver yet
+        }
+    }
+
     private fun payOne(id: UUID) {
         val ref = referrals.findById(id).orElse(null) ?: return
         val referrer = users.findById(ref.referrerId).orElse(null) ?: return
         val accountId = referrer.stripeAccountId
         if (referrer.suspended) return
+
+        when (val blocker = payoutBlocker(ref)) {
+            null -> Unit
+            "WAIT" -> return
+            else -> {
+                tx.execute {
+                    val r = referrals.findById(id).orElseThrow()
+                    if (r.status == ReferralStatus.QUALIFIED) {
+                        r.status = ReferralStatus.REJECTED
+                        r.rejectReason = blocker
+                        r.updatedAt = Instant.now()
+                        referrals.save(r)
+                    }
+                }
+                log.warn("🚫 Referral $id rejected before payout: $blocker")
+                return
+            }
+        }
+
         // Referrer hasn't set up payouts yet — keep it owed, try again next sweep.
         if (accountId == null || !stripe.isAccountReadyForTransfers(accountId, referrer.id)) return
 
