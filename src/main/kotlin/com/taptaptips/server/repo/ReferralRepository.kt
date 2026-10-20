@@ -3,7 +3,9 @@ package com.taptaptips.server.repo
 import com.taptaptips.server.domain.Referral
 import com.taptaptips.server.domain.ReferralCode
 import com.taptaptips.server.domain.ReferralStatus
+import jakarta.persistence.LockModeType
 import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Lock
 import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
@@ -13,6 +15,15 @@ import java.util.UUID
 interface ReferralCodeRepository : JpaRepository<ReferralCode, UUID> {
     fun findByCode(code: String): ReferralCode?
     fun existsByCode(code: String): Boolean
+
+    /**
+     * SELECT ... FOR UPDATE on the referrer's code row. Held for the rest of the
+     * transaction, so qualifications for one referrer run one at a time and the
+     * monthly-cap count can't be raced. Must be called inside a transaction.
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT c FROM ReferralCode c WHERE c.userId = :userId")
+    fun lockByUserId(@Param("userId") userId: UUID): ReferralCode?
 }
 
 interface ReferralRepository : JpaRepository<Referral, UUID> {

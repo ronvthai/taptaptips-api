@@ -9,6 +9,7 @@ import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.repo.TipRepository
 import com.taptaptips.server.service.HeldTipService
 import com.taptaptips.server.service.NotificationService
+import com.taptaptips.server.service.ReferralService
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.http.HttpStatus
@@ -24,6 +25,7 @@ class StripeWebhookController(
     private val userRepository: AppUserRepository,
     private val notificationService: NotificationService,
     private val heldTipService: HeldTipService,
+    private val referralService: ReferralService,
 
     @Value("\${stripe.webhook.secret}")
     private val webhookSecret: String,
@@ -253,6 +255,11 @@ class StripeWebhookController(
                 tipRepository.save(tip)
                 logger.info("✅ Marked tip ${tip.id} as SUCCEEDED")
             }
+
+            // Referral: a referred friend's real tip is what earns the referrer
+            // their reward (payout still waits until this tip has SUCCEEDED).
+            // Never throws, and is a no-op on webhook retries.
+            referralService.onTipCharged(tip, charge)
 
             // Stripe has confirmed the charge — now it's safe to notify the receiver
             val receiver = tip.receiver
