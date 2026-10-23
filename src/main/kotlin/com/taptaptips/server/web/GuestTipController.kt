@@ -23,7 +23,7 @@ import java.util.UUID
  *   POST /t/{code}/complete   {paymentIntentId} → {status, amountCents}
  *   GET  /tiplink/me          (logged in) the receiver's own link for QR / NFC
  *
- * /t/** must be permitAll in SecurityConfig.
+ * Every /t/ path must be permitAll in SecurityConfig.
  */
 @RestController
 class GuestTipController(
