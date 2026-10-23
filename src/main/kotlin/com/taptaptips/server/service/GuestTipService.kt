@@ -94,7 +94,7 @@ class GuestTipService(
     fun unavailableReason(r: Receiver): String? = when {
         !enabled -> "Tipping by link isn't available right now."
         r.user.suspended -> "This person can't receive tips right now."
-        !r.user.wantsToReceiveTips || r.user.stripeAccountId.isNullOrBlank() || !r.user.stripeOnboarded ->
+                r.user.stripeAccountId.isNullOrBlank() || !r.user.stripeOnboarded ->
             "${r.publicName} hasn't finished setting up tips yet."
         else -> null
     }
