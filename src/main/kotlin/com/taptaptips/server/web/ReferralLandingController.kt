@@ -34,6 +34,7 @@ class ReferralLandingController(
     @Value("\${referral.playPackage:com.app.taptaptips}") private val playPackage: String
 ) {
     private val codeRegex = Regex("^[A-Z0-9]{4,12}$")
+    private val validStoreUrl = Regex("^https://(apps|itunes)\\.apple\\.com/[A-Za-z0-9/_.-]*id[0-9]+[A-Za-z0-9?=&_.-]*$")
 
     @GetMapping("/r/{code}", produces = [MediaType.TEXT_HTML_VALUE])
     fun landing(@PathVariable code: String): ResponseEntity<String> {
@@ -51,7 +52,10 @@ class ReferralLandingController(
         return ResponseEntity.ok()
             .cacheControl(CacheControl.maxAge(Duration.ofMinutes(5)))
             .contentType(MediaType.TEXT_HTML)
-            .body(page(shown, playUrl, appStoreUrl.trim()))
+            // A bad REFERRAL_APPSTOREURL (e.g. the "<your Apple ID>" placeholder)
+            // makes Safari say "address is invalid" — fall back to "search the
+            // App Store" instead of a broken button.
+            .body(page(shown, playUrl, appStoreUrl.trim().takeIf { validStoreUrl.matches(it) } ?: ""))
     }
 
     // `code` is either null or matches [A-Z0-9]{4,12}; URLs come from config,
@@ -73,7 +77,8 @@ class ReferralLandingController(
             else -> "<a class=\"btn primary\" href=\"$store\">Download on the App Store</a>"
         }
         val iosExtra = if (hasCode)
-            "<a class=\"btn secondary\" href=\"taptaptips://r/$code\">Already have it? Open TapTapTips</a>\n" +
+            "<button class=\"btn secondary\" id=\"openApp\" data-href=\"taptaptips://r/$code\">Already have it? Open TapTapTips</button>\n" +
+            "<div class=\"hint hidden\" id=\"openHint\">Looks like TapTapTips isn't on this phone yet. Tap <b>Copy code &amp; get the app</b> above.</div>\n" +
             "<div class=\"note\">When you sign up, tap <b>Paste</b> next to the referral code field.</div>"
         else ""
         val androidNote = if (hasCode)
@@ -111,6 +116,7 @@ class ReferralLandingController(
   .secondary { background:transparent; color:var(--green); border:1px solid var(--green) !important; }
   .hidden { display:none !important; }
   .note { font-size:13px; color:var(--muted); margin-top:16px; }
+  .hint { font-size:14px; color:#FFC107; margin:-4px 0 12px; line-height:1.4; }
   .toast { color:var(--green); font-size:14px; min-height:20px; margin:0 0 12px; }
   a:focus-visible, button:focus-visible { outline:3px solid #fff; outline-offset:2px; }
 </style>
@@ -143,6 +149,24 @@ class ReferralLandingController(
   var codeEl = document.getElementById("code");
   var toast = document.getElementById("toast");
   var appStore = "$store";
+  // "Already have it?" — try the app. If TapTapTips isn't installed, Safari
+  // shows "address is invalid" and the page stays in front, so after a moment
+  // we show what to do instead.
+  var openBtn = document.getElementById("openApp");
+  var openHint = document.getElementById("openHint");
+  if (openBtn) {
+    openBtn.addEventListener("click", function () {
+      var left = false;
+      var onHide = function () { if (document.hidden) left = true; };
+      document.addEventListener("visibilitychange", onHide);
+      window.location.href = openBtn.getAttribute("data-href");
+      setTimeout(function () {
+        document.removeEventListener("visibilitychange", onHide);
+        if (!left && !document.hidden && openHint) openHint.classList.remove("hidden");
+      }, 1500);
+    });
+  }
+
   if (getBtn) {
     getBtn.addEventListener("click", function () {
       var go = function () { window.location.href = appStore; };
