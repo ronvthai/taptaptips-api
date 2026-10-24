@@ -296,7 +296,7 @@ class TipController(
     private fun Tip.toReceivedDto() = TipSummaryDto(
         id               = id.toString(),
         senderId         = sender?.id?.toString()   ?: "",
-        senderName       = sender?.displayName      ?: "Unknown",
+        senderName = sender?.displayName ?: if (nonce.startsWith("guest-")) "Guest" else "Unknown",
         senderOnboarded  = sender?.stripeOnboarded  ?: false,
         amount           = amount,
         netAmount        = netAmount,

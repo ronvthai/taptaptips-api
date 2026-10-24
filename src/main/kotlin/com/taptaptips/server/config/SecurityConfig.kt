@@ -56,6 +56,8 @@ class SecurityConfig(
                     // and the landing page referral QR codes open (/r/CODE).
                     .requestMatchers(HttpMethod.GET, "/referrals/config").permitAll()
                     .requestMatchers(HttpMethod.GET, "/r/**").permitAll()
+                    .requestMatchers(HttpMethod.GET, "/t/**").permitAll()
+                    .requestMatchers(HttpMethod.POST, "/t/*/intent", "/t/*/complete").permitAll()
                     .anyRequest().authenticated()
             }
             .addFilterBefore(rateLimitFilter, UsernamePasswordAuthenticationFilter::class.java)
