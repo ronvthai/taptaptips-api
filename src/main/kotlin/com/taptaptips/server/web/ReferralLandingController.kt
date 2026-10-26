@@ -34,6 +34,12 @@ class ReferralLandingController(
     @Value("\${referral.playPackage:com.app.taptaptips}") private val playPackage: String
 ) {
     private val codeRegex = Regex("^[A-Z0-9]{4,12}$")
+
+    /** TapTapTips on the App Store (Taptaptips inc). Used when REFERRAL_APPSTOREURL is unset or malformed. */
+    private val defaultStoreUrl = "https://apps.apple.com/app/id6764665388"
+
+    private fun storeUrl(): String =
+        appStoreUrl.trim().trim('"', '\'').takeIf { validStoreUrl.matches(it) } ?: defaultStoreUrl
     private val validStoreUrl = Regex("^https://(apps|itunes)\\.apple\\.com/[A-Za-z0-9/_.-]*id[0-9]+[A-Za-z0-9?=&_.-]*$")
 
     @GetMapping("/r/{code}", produces = [MediaType.TEXT_HTML_VALUE])
@@ -55,7 +61,7 @@ class ReferralLandingController(
             // A bad REFERRAL_APPSTOREURL (e.g. the "<your Apple ID>" placeholder)
             // makes Safari say "address is invalid" — fall back to "search the
             // App Store" instead of a broken button.
-            .body(page(shown, playUrl, appStoreUrl.trim().takeIf { validStoreUrl.matches(it) } ?: ""))
+            .body(page(shown, playUrl, storeUrl()))
     }
 
     // `code` is either null or matches [A-Z0-9]{4,12}; URLs come from config,
