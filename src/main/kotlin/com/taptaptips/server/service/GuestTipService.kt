@@ -56,15 +56,18 @@ class GuestTipService(
     private val guestTips: GuestTipRepository,
     private val fcmTokens: FcmTokenRepository,
     private val stripe: StripePaymentService,
-    @Value("\${tips.guest.enabled:true}") val enabled: Boolean,
+    private val settings: RuntimeSettings,
     @Value("\${tips.guest.baseUrl:https://tip.taptaptips.com}") private val baseUrl: String,
-    @Value("\${tips.guest.minCents:100}") val minCents: Long,
-    @Value("\${tips.guest.maxCents:20000}") val maxCents: Long,
-    @Value("\${tips.guest.perIpPer10Min:10}") private val perIpPer10Min: Int,
-    @Value("\${tips.guest.perReceiverPerHour:60}") private val perReceiverPerHour: Int,
     @Value("\${tips.guest.timezone:America/Los_Angeles}") private val timezone: String
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
+
+    // Changeable from the admin page (/admin) without a redeploy — see RuntimeSettings.
+    val enabled get() = settings.bool(RuntimeSettings.GUEST_ENABLED)
+    val minCents get() = settings.long(RuntimeSettings.GUEST_MIN_CENTS)
+    val maxCents get() = settings.long(RuntimeSettings.GUEST_MAX_CENTS)
+    private val perIpPer10Min get() = settings.int(RuntimeSettings.GUEST_PER_IP)
+    private val perReceiverPerHour get() = settings.int(RuntimeSettings.GUEST_PER_RECEIVER)
     private val codeRegex = Regex("^[A-Z0-9]{4,12}$")
 
     data class Receiver(val user: AppUser, val code: String) {
@@ -94,7 +97,9 @@ class GuestTipService(
     fun unavailableReason(r: Receiver): String? = when {
         !enabled -> "Tipping by link isn't available right now."
         r.user.suspended -> "This person can't receive tips right now."
-                r.user.stripeAccountId.isNullOrBlank() || !r.user.stripeOnboarded ->
+        // Same rule as the app's QR icon: a Stripe account that finished onboarding.
+        // (wantsToReceiveTips is only set at sign-up, so it's not checked here.)
+        r.user.stripeAccountId.isNullOrBlank() || !r.user.stripeOnboarded ->
             "${r.publicName} hasn't finished setting up tips yet."
         else -> null
     }

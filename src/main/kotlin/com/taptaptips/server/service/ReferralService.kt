@@ -74,7 +74,10 @@ import java.util.UUID
  * referral.payoutsPaused=true.
  *
  * Config (all optional):
- *   referral.enabled              false   (switch on from Render when ready)
+ * enabled / payoutsPaused / rewardCents / minTipCents / monthlyCap are now
+ * changed on the admin page (/admin); the values below are the defaults.
+ *
+ *   referral.enabled              false
  *   referral.payoutsPaused        false
  *   referral.qualifyWindowDays    30
  *   referral.rewardCents          500
@@ -96,17 +99,23 @@ class ReferralService(
     private val schema: ReferralSchema,
     txManager: PlatformTransactionManager,
 
-    @Value("\${referral.enabled:false}") private val enabled: Boolean,
-    @Value("\${referral.payoutsPaused:false}") private val payoutsPaused: Boolean,
+    private val settings: RuntimeSettings,
+
     @Value("\${referral.qualifyWindowDays:30}") private val qualifyWindowDays: Long,
-    @Value("\${referral.rewardCents:500}") private val rewardCents: Long,
-    @Value("\${referral.minTipCents:500}") private val minTipCents: Long,
-    @Value("\${referral.monthlyCap:50}") private val monthlyCap: Long,
     @Value("\${referral.payoutDelayHours:168}") private val payoutDelayHours: Long,
     @Value("\${referral.applyWindowHours:24}") private val applyWindowHours: Long,
     @Value("\${referral.shareUrl:https://taptaptips.com}") private val shareUrl: String
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
+
+    // Changeable from the admin page (/admin) without a redeploy — see RuntimeSettings.
+    // Render env vars (REFERRAL_ENABLED, REFERRAL_REWARDCENTS, …) still work as the defaults.
+    private val enabled get() = settings.bool(RuntimeSettings.REFERRAL_ENABLED)
+    private val payoutsPaused get() = settings.bool(RuntimeSettings.REFERRAL_PAYOUTS_PAUSED)
+    private val rewardCents get() = settings.long(RuntimeSettings.REFERRAL_REWARD_CENTS)
+    private val minTipCents get() = settings.long(RuntimeSettings.REFERRAL_MIN_TIP_CENTS)
+    private val monthlyCap get() = settings.long(RuntimeSettings.REFERRAL_MONTHLY_CAP)
+
     private val rng = SecureRandom()
     private val tx = TransactionTemplate(txManager).apply {
         propagationBehavior = TransactionDefinition.PROPAGATION_REQUIRES_NEW

@@ -58,6 +58,10 @@ class SecurityConfig(
                     .requestMatchers(HttpMethod.GET, "/r/**").permitAll()
                     .requestMatchers(HttpMethod.GET, "/t/**").permitAll()
                     .requestMatchers(HttpMethod.POST, "/t/*/intent", "/t/*/complete").permitAll()
+                    // Admin settings page: has its own password check (ADMIN_PASSWORD),
+                    // not the app login. See AdminController.
+                    .requestMatchers(HttpMethod.GET, "/admin", "/admin/api/settings").permitAll()
+                    .requestMatchers(HttpMethod.POST, "/admin/api/**").permitAll()
                     .anyRequest().authenticated()
             }
             .addFilterBefore(rateLimitFilter, UsernamePasswordAuthenticationFilter::class.java)
