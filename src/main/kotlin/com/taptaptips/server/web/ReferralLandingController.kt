@@ -78,7 +78,9 @@ class ReferralLandingController(
         }
         val iosExtra = if (hasCode)
             "<button class=\"btn secondary\" id=\"openApp\" data-href=\"taptaptips://r/$code\">Already have it? Open TapTapTips</button>\n" +
-            "<div class=\"hint hidden\" id=\"openHint\">Looks like TapTapTips isn't on this phone yet. Tap <b>Copy code &amp; get the app</b> above.</div>\n" +
+            "<div class=\"hint hidden\" id=\"openHint\">Looks like TapTapTips isn't on this phone yet. " +
+                (if (hasStore) "Tap <b>Copy code &amp; get the app</b> above." else "Search <b>TapTapTips</b> in the App Store.") +
+                "</div>\n" +
             "<div class=\"note\">When you sign up, tap <b>Paste</b> next to the referral code field.</div>"
         else ""
         val androidNote = if (hasCode)
