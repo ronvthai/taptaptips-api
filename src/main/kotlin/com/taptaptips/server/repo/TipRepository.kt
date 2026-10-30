@@ -1,403 +1,108 @@
-package com.taptaptips.server.web
+package com.taptaptips.server.repo
 
 import com.taptaptips.server.domain.Tip
-import com.taptaptips.server.domain.TipStatus
-import com.taptaptips.server.domain.HeldTipStatus
-import com.taptaptips.server.repo.HeldTipRepository
-import com.taptaptips.server.service.HeldTipService
-import com.taptaptips.server.repo.AppUserRepository
-import com.taptaptips.server.repo.TipRepository
-import com.taptaptips.server.service.TipSecurityService
-import com.taptaptips.server.service.TipSecurityService.AlreadyProcessed
-import com.taptaptips.server.service.NotificationService
-import org.slf4j.LoggerFactory
-import org.springframework.dao.DataIntegrityViolationException
-import org.springframework.data.domain.PageRequest
-import org.springframework.data.domain.Sort
-import org.springframework.security.core.context.SecurityContextHolder
-import org.springframework.transaction.annotation.Transactional
-import org.springframework.web.bind.annotation.*
-import java.math.BigDecimal
+import org.springframework.data.domain.Page
+import org.springframework.data.domain.Pageable
+import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Modifying
+import org.springframework.data.jpa.repository.Query
+import org.springframework.data.repository.query.Param
 import java.time.Instant
 import java.time.LocalDate
-import java.time.ZoneId
-import java.util.UUID
+import java.util.*
 
-@RestController
-@RequestMapping("/tips")
-class TipController(
-    private val tips: TipRepository,
-    private val users: AppUserRepository,
-    private val security: TipSecurityService,
-    private val stripeService: com.taptaptips.server.service.StripePaymentService,
-    private val notificationService: NotificationService,
-    private val heldTipService: HeldTipService,
-    private val heldTips: HeldTipRepository
-) {
-    private val log = LoggerFactory.getLogger(javaClass)
+interface TipRepository : JpaRepository<Tip, UUID> {
 
-    companion object {
-        private const val DEFAULT_PAGE_SIZE = 50
-        /**
-         * Every history request returns up to this many tips, whatever size the
-         * app asks for. Installed apps only ever read page 0 of a date range
-         * (Android even asks for size=50), so a week with more than 50 tips
-         * showed an incomplete list and total. totalPages is computed from this
-         * size, so apps that DO page (the home-screen daily total) still work.
-         */
-        private const val PAGE_SIZE         = 1000
-    }
+    fun existsBySender_IdAndNonce(senderId: UUID, nonce: String): Boolean
 
-    private fun authUserId(): UUID =
-        UUID.fromString(SecurityContextHolder.getContext().authentication.name)
+    // ── DEPRECATED: Instant-based queries (kept for backward compatibility) ──
+    fun findByReceiver_IdAndCreatedAtBetween(
+        receiverId: UUID,
+        startDate: Instant,
+        endDate: Instant
+    ): List<Tip>
 
-    /**
-     * POST /tips
-     *
-     * FIX — Orphan tip on Stripe failure:
-     *   Tip is saved as PENDING, then Stripe is called inside a try/catch.
-     *   On any Stripe exception the tip is immediately marked FAILED — no orphan
-     *   PENDING rows that will never settle.
-     *
-     * FIX — Double FCM notification:
-     *   The immediate notifyTipReceived() call has been removed.
-     *   StripeWebhookController.handleChargeSucceeded() is the single notification
-     *   path. It fires after Stripe confirms funds are captured — the correct moment
-     *   to tell the receiver money is on the way. The old pre-confirm notification
-     *   fired on tips that could still fail (declined cards, etc.).
-     */
-    @PostMapping
-    @Transactional
-    fun create(@RequestBody req: CreateTipRequest): TipResult {
-        val auth = authUserId()
-        val v = try { security.verifyRequest(req, auth) }
-                catch (e: AlreadyProcessed) { return TipResult("DUPLICATE") }
+    fun findBySender_IdAndCreatedAtBetween(
+        senderId: UUID,
+        startDate: Instant,
+        endDate: Instant
+    ): List<Tip>
 
-        val sender   = users.findById(v.senderId).orElseThrow()
-        val receiver = users.findById(v.receiverId).orElseThrow()
+    // ── FIX: FETCH JOIN eliminates N+1 on sender/receiver display names ──
+    // History lists (received / sent) leave out FAILED tips: the card was
+    // declined, no money moved, and summing them made the Tip Summary total
+    // wrong on every installed app version. The rows stay in the table for
+    // auditing; they're just not shown as tips.
+    @Query("""
+        SELECT t FROM Tip t
+        LEFT JOIN FETCH t.sender
+        LEFT JOIN FETCH t.receiver
+        WHERE t.receiver.id = :receiverId
+          AND t.createdAtLocal BETWEEN :startDate AND :endDate
+          AND t.status <> 'FAILED'
+        ORDER BY t.createdAt DESC
+    """)
+    fun findByReceiver_IdAndCreatedAtLocalBetween(
+        @Param("receiverId") receiverId: UUID,
+        @Param("startDate") startDate: LocalDate,
+        @Param("endDate") endDate: LocalDate,
+        pageable: Pageable
+    ): Page<Tip>
 
-        val senderCustomerId = sender.stripeCustomerId
-            ?: return TipResult("SENDER_NOT_SETUP")
-        val paymentMethodId = sender.defaultPaymentMethodId
-            ?: return TipResult("NO_PAYMENT_METHOD")
+    @Query("""
+        SELECT t FROM Tip t
+        LEFT JOIN FETCH t.sender
+        LEFT JOIN FETCH t.receiver
+        WHERE t.sender.id = :senderId
+          AND t.createdAtLocal BETWEEN :startDate AND :endDate
+          AND t.status <> 'FAILED'
+        ORDER BY t.createdAt DESC
+    """)
+    fun findBySender_IdAndCreatedAtLocalBetween(
+        @Param("senderId") senderId: UUID,
+        @Param("startDate") startDate: LocalDate,
+        @Param("endDate") endDate: LocalDate,
+        pageable: Pageable
+    ): Page<Tip>
 
-        // Receiver fully onboarded → existing destination-charge flow (money
-        // goes straight to their connected account). Otherwise → held flow.
-        // NOTE: previously this only checked stripeAccountId != null, but an
-        // Express account exists as soon as registration starts onboarding, so
-        // half-onboarded receivers fell into the destination path and failed.
-        val receiverStripeAccountId = receiver.stripeAccountId
-        if (!receiver.stripeOnboarded || receiverStripeAccountId == null) {
-            return createHeldTip(req, v, sender, senderCustomerId, paymentMethodId)
-        }
+    @Query("""
+        SELECT t FROM Tip t
+        LEFT JOIN FETCH t.sender
+        LEFT JOIN FETCH t.receiver
+        WHERE t.receiver.id = :receiverId
+          AND t.createdAtLocal = :date
+          AND t.status <> 'FAILED'
+        ORDER BY t.createdAt DESC
+    """)
+    fun findByReceiver_IdAndCreatedAtLocal(
+        @Param("receiverId") receiverId: UUID,
+        @Param("date") date: LocalDate,
+        pageable: Pageable
+    ): Page<Tip>
 
-        return try {
-            val now          = Instant.now()
-            val localDate    = now.atZone(ZoneId.of(req.timezone)).toLocalDate()
-            val feeBreakdown = stripeService.calculateFeeBreakdown(v.amount)
+    // ── Webhook lookups ──
+    @Query("SELECT t FROM Tip t LEFT JOIN FETCH t.sender LEFT JOIN FETCH t.receiver WHERE t.paymentIntentId = :id")
+    fun findByPaymentIntentId(@Param("id") id: String): Tip?
 
-            val tip = tips.save(
-                Tip(
-                    sender         = sender,
-                    receiver       = receiver,
-                    amount         = v.amount,
-                    netAmount      = feeBreakdown.receiverGets,
-                    totalFees      = feeBreakdown.totalFee,
-                    platformFee    = feeBreakdown.platformFee,
-                    createdAt      = now,
-                    createdAtLocal = localDate,
-                    timezone       = req.timezone,
-                    nonce          = v.nonce,
-                    timestamp      = v.timestamp,
-                    verified       = true,
-                    status         = TipStatus.PENDING
-                )
-            )
+    @Query("SELECT t FROM Tip t LEFT JOIN FETCH t.sender LEFT JOIN FETCH t.receiver WHERE t.chargeId = :id")
+    fun findByChargeId(@Param("id") id: String): Tip?
 
-            // Stripe call wrapped — any failure marks the tip FAILED immediately
-            val paymentIntent = try {
-                stripeService.createPaymentIntentWithSavedMethod(
-                    amount                  = v.amount,
-                    receiverStripeAccountId = receiverStripeAccountId,
-                    senderId                = v.senderId,
-                    receiverId              = v.receiverId,
-                    tipNonce                = v.nonce,
-                    paymentMethodId         = paymentMethodId,
-                    senderCustomerId        = senderCustomerId
-                )
-            } catch (e: Exception) {
-                log.error("❌ Stripe PaymentIntent failed for tip ${tip.id}: ${e.message}")
-                tip.status        = TipStatus.FAILED
-                tip.failureReason = e.message
-                tip.updatedAt     = Instant.now()
-                tips.save(tip)
-                return TipResult("PAYMENT_FAILED")
-            }
+    fun findByNonce(nonce: String): Tip?
+    fun countBySender_Id(senderId: UUID): Long
 
-            tip.paymentIntentId = paymentIntent.id
-            tip.updatedAt       = Instant.now()
-            // Off-session confirm is synchronous for cards: record the outcome
-            // now instead of leaving the tip PENDING until charge.succeeded
-            // arrives (or forever, if that webhook is ever missed). Same as the
-            // held path below. The webhook still runs, re-sets SUCCEEDED
-            // idempotently and sends the receiver's notification.
-            when (paymentIntent.status) {
-                "succeeded" -> {
-                    tip.status   = TipStatus.SUCCEEDED
-                    tip.chargeId = paymentIntent.latestCharge
-                }
-                "requires_payment_method", "canceled" -> {
-                    // Declined without an exception (rare). Never report it as sent.
-                    tip.status        = TipStatus.FAILED
-                    tip.failureReason = paymentIntent.lastPaymentError?.message ?: "Payment ${paymentIntent.status}"
-                    tips.save(tip)
-                    return TipResult("PAYMENT_FAILED")
-                }
-            }
-            tips.save(tip)
+    @Query("SELECT COUNT(t) FROM Tip t WHERE t.sender.id = :senderId AND t.status = 'DISPUTED'")
+    fun countDisputesBySender(@Param("senderId") senderId: UUID): Long
 
-            // Notification intentionally removed — webhook fires after Stripe confirms
+    // ── Account deletion: null out FK references without deleting tip rows ──
+    // Tip rows are financial records retained for Stripe disputes and tax
+    // reporting. On account deletion, we strip the user FK so no PII is
+    // reachable through the tip, but the amounts and timestamps remain.
 
-            TipResult("CONFIRMED")
-        } catch (e: DataIntegrityViolationException) {
-            TipResult("DUPLICATE")
-        }
-    }
+    @Modifying
+    @Query("UPDATE Tip t SET t.sender = NULL WHERE t.sender.id = :userId")
+    fun nullifySenderReferences(@Param("userId") userId: UUID)
 
-    /**
-     * Receiver hasn't linked a bank yet. Charge the sender on the platform
-     * account and park the money in a HeldTip row; HeldTipService transfers it
-     * once the receiver finishes Stripe onboarding (or refunds it on expiry).
-     *
-     * Returns "HELD" on success so the client can tell the sender the tip went
-     * through but will be paid out once the recipient links their bank.
-     */
-    private fun createHeldTip(
-        req: CreateTipRequest,
-        v: TipSecurityService.VerifiedInput,
-        sender: com.taptaptips.server.domain.AppUser,
-        senderCustomerId: String,
-        paymentMethodId: String
-    ): TipResult {
-        // Row lock on the receiver: serialises concurrent held tips to the same
-        // person so the holding cap can't be raced.
-        val receiver = users.findByIdForUpdate(v.receiverId) ?: return TipResult("RECEIVER_UNAVAILABLE")
-
-        val feeBreakdown = stripeService.calculateFeeBreakdown(v.amount)
-        heldTipService.rejectionReason(sender.id, receiver, feeBreakdown)
-            ?.let { return TipResult(it) }
-
-        return try {
-            val now       = Instant.now()
-            val localDate = now.atZone(ZoneId.of(req.timezone)).toLocalDate()
-
-            val tip = tips.save(
-                Tip(
-                    sender         = sender,
-                    receiver       = receiver,
-                    amount         = v.amount,
-                    netAmount      = feeBreakdown.receiverGets,
-                    totalFees      = feeBreakdown.totalFee,
-                    platformFee    = feeBreakdown.platformFee,
-                    createdAt      = now,
-                    createdAtLocal = localDate,
-                    timezone       = req.timezone,
-                    nonce          = v.nonce,
-                    timestamp      = v.timestamp,
-                    verified       = true,
-                    status         = TipStatus.PENDING
-                )
-            )
-            val held = heldTipService.createHold(tip, feeBreakdown, v.verifiedDeviceId)
-
-            val paymentIntent = try {
-                stripeService.createHeldPaymentIntent(
-                    amount           = v.amount,
-                    senderId         = v.senderId,
-                    receiverId       = v.receiverId,
-                    tipId            = tip.id,
-                    heldTipId        = held.id,
-                    tipNonce         = v.nonce,
-                    transferGroup    = held.transferGroup,
-                    paymentMethodId  = paymentMethodId,
-                    senderCustomerId = senderCustomerId
-                )
-            } catch (e: Exception) {
-                log.error("❌ Held-tip PaymentIntent failed for tip ${tip.id}: ${e.message}")
-                tip.status        = TipStatus.FAILED
-                tip.failureReason = e.message
-                tip.updatedAt     = Instant.now()
-                tips.save(tip)
-                held.status    = HeldTipStatus.FAILED
-                held.lastError = e.message?.take(1000)
-                held.updatedAt = Instant.now()
-                heldTips.save(held)
-                return TipResult("PAYMENT_FAILED")
-            }
-
-            tip.paymentIntentId  = paymentIntent.id
-            tip.updatedAt        = Instant.now()
-            held.paymentIntentId = paymentIntent.id
-            held.updatedAt       = Instant.now()
-
-            // Off-session confirm usually succeeds synchronously; record the
-            // charge now. charge.succeeded will arrive later and is idempotent.
-            if (paymentIntent.status == "succeeded" && paymentIntent.latestCharge != null) {
-                tip.chargeId  = paymentIntent.latestCharge
-                tip.status    = TipStatus.HELD
-                held.chargeId = paymentIntent.latestCharge
-                held.status   = HeldTipStatus.HELD
-                held.heldAt   = Instant.now()
-            }
-            tips.save(tip)
-            heldTips.save(held)
-
-            log.info("🅿️ Tip ${tip.id} HELD for receiver ${receiver.id} (${feeBreakdown.receiverGetsCents}¢ net)")
-            TipResult("HELD")
-        } catch (e: DataIntegrityViolationException) {
-            TipResult("DUPLICATE")
-        }
-    }
-
-    /** GET /tips/held/summary — what's waiting for the caller once they link a bank. */
-    @GetMapping("/held/summary")
-    fun heldSummary(): HeldTipService.HeldSummary = heldTipService.summaryFor(authUserId())
-
-    @GetMapping("/received")
-    fun getReceivedTips(
-        @RequestParam(required = false) date: String?,
-        @RequestParam(required = false) startDate: String?,
-        @RequestParam(required = false) endDate: String?,
-        @RequestParam(defaultValue = "0") page: Int,
-        @RequestParam(defaultValue = "$DEFAULT_PAGE_SIZE") size: Int
-    ): TipPageResult {
-        val receiverId = authUserId()
-        val pageable   = PageRequest.of(page, PAGE_SIZE, Sort.by("createdAt").descending())
-
-        val tipPage = when {
-            startDate != null && endDate != null ->
-                tips.findByReceiver_IdAndCreatedAtLocalBetween(
-                    receiverId, LocalDate.parse(startDate), LocalDate.parse(endDate), pageable
-                )
-            else ->
-                tips.findByReceiver_IdAndCreatedAtLocal(
-                    receiverId, date?.let { LocalDate.parse(it) } ?: LocalDate.now(), pageable
-                )
-        }
-
-        return TipPageResult(
-            tips          = tipPage.content.map { it.toReceivedDto() },
-            totalElements = tipPage.totalElements,
-            totalPages    = tipPage.totalPages,
-            page          = page,
-            size          = tipPage.numberOfElements
-        )
-    }
-
-    @GetMapping("/sent")
-    fun getSentTips(
-        @RequestParam(required = false) startDate: String?,
-        @RequestParam(required = false) endDate: String?,
-        @RequestParam(defaultValue = "0") page: Int,
-        @RequestParam(defaultValue = "$DEFAULT_PAGE_SIZE") size: Int
-    ): TipPageResult {
-        val senderId = authUserId()
-        val pageable = PageRequest.of(page, PAGE_SIZE, Sort.by("createdAt").descending())
-
-        val start = startDate?.let { LocalDate.parse(it) } ?: LocalDate.now().withDayOfMonth(1)
-        val end   = endDate?.let   { LocalDate.parse(it) } ?: LocalDate.now()
-
-        val tipPage = tips.findBySender_IdAndCreatedAtLocalBetween(senderId, start, end, pageable)
-
-        return TipPageResult(
-            tips          = tipPage.content.map { it.toSentDto() },
-            totalElements = tipPage.totalElements,
-            totalPages    = tipPage.totalPages,
-            page          = page,
-            size          = tipPage.numberOfElements
-        )
-    }
-
-    private fun Tip.toReceivedDto() = TipSummaryDto(
-        id               = id.toString(),
-        senderId         = sender?.id?.toString()   ?: "",
-        senderName = sender?.displayName ?: if (nonce.startsWith("guest-")) "Guest" else "Unknown",
-        senderOnboarded  = sender?.stripeOnboarded  ?: false,
-        amount           = amount,
-        netAmount        = netAmount,
-        totalFees        = totalFees,
-        platformFee      = platformFee,
-        createdAt        = createdAt.toString(),
-        createdAtLocal   = createdAtLocal.toString(),
-        timezone         = timezone,
-        status           = status.name,
-        pendingPayout    = status == TipStatus.HELD
-    )
-
-    private fun Tip.toSentDto() = SentTipSummaryDto(
-        id             = id.toString(),
-        recipientId    = receiver?.id?.toString() ?: "",
-        recipientName  = receiver?.displayName   ?: "Unknown",
-        amount         = amount,
-        netAmount      = netAmount,
-        totalFees      = totalFees,
-        platformFee    = platformFee,
-        createdAt      = createdAt.toString(),
-        createdAtLocal = createdAtLocal.toString(),
-        timezone       = timezone,
-        status         = status.name,
-        pendingPayout  = status == TipStatus.HELD
-    )
+    @Modifying
+    @Query("UPDATE Tip t SET t.receiver = NULL WHERE t.receiver.id = :userId")
+    fun nullifyReceiverReferences(@Param("userId") userId: UUID)
 }
-
-data class TipPageResult(
-    val tips: List<Any>,
-    val totalElements: Long,
-    val totalPages: Int,
-    val page: Int,
-    val size: Int
-)
-
-data class TipSummaryDto(
-    val id: String,
-    val senderId: String,
-    val senderName: String,
-    /**
-     * Whether the sender can currently receive tips (has completed Stripe
-     * Connect onboarding). Used by the client's Received tab to gate the
-     * "Send Tip Back" button — no point offering the button if the tip
-     * would end up held (see HeldTip) instead of paid out right away.
-     *
-     * Read from the cached `stripeOnboarded` flag on the User entity — no
-     * live Stripe API call, so this is cheap to include per row.
-     */
-    val senderOnboarded: Boolean = false,
-    val amount: BigDecimal,
-    val netAmount: BigDecimal?   = null,
-    val totalFees: BigDecimal?   = null,
-    val platformFee: BigDecimal? = null,
-    val createdAt: String,
-    val createdAtLocal: String,
-    val timezone: String,
-    /** TipStatus name — PENDING | HELD | SUCCEEDED | FAILED | DISPUTED | REFUNDED */
-    val status: String = "SUCCEEDED",
-    /** True while the money is parked waiting for the receiver to link a bank. */
-    val pendingPayout: Boolean = false
-)
-
-data class SentTipSummaryDto(
-    val id: String,
-    val recipientId: String,
-    val recipientName: String,
-    val amount: BigDecimal,
-    val netAmount: BigDecimal?   = null,
-    val totalFees: BigDecimal?   = null,
-    val platformFee: BigDecimal? = null,
-    val createdAt: String,
-    val createdAtLocal: String,
-    val timezone: String,
-    /** TipStatus name — PENDING | HELD | SUCCEEDED | FAILED | DISPUTED | REFUNDED */
-    val status: String = "SUCCEEDED",
-    /** True while the money is parked waiting for the receiver to link a bank. */
-    val pendingPayout: Boolean = false
-)
