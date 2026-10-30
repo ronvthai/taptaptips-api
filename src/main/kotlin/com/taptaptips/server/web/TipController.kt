@@ -129,6 +129,24 @@ class TipController(
 
             tip.paymentIntentId = paymentIntent.id
             tip.updatedAt       = Instant.now()
+            // Off-session confirm is synchronous for cards: record the outcome
+            // now instead of leaving the tip PENDING until charge.succeeded
+            // arrives (or forever, if that webhook is ever missed). Same as the
+            // held path below. The webhook still runs, re-sets SUCCEEDED
+            // idempotently and sends the receiver's notification.
+            when (paymentIntent.status) {
+                "succeeded" -> {
+                    tip.status   = TipStatus.SUCCEEDED
+                    tip.chargeId = paymentIntent.latestCharge
+                }
+                "requires_payment_method", "canceled" -> {
+                    // Declined without an exception (rare). Never report it as sent.
+                    tip.status        = TipStatus.FAILED
+                    tip.failureReason = paymentIntent.lastPaymentError?.message ?: "Payment ${paymentIntent.status}"
+                    tips.save(tip)
+                    return TipResult("PAYMENT_FAILED")
+                }
+            }
             tips.save(tip)
 
             // Notification intentionally removed — webhook fires after Stripe confirms
