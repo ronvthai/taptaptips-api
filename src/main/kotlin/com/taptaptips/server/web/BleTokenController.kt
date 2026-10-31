@@ -165,7 +165,7 @@ class BleTokenController(
                 val slid = entry.copy(expiresAt = now + ttlMs)
                 tokenToUser[existing] = slid
                 userToToken[userId] = existing
-                dbSlide(existing, slid.expiresAt)
+                dbSlide(existing, userId, slid.expiresAt)
                 return BleTokenResponse(token = existing)
             }
         }
@@ -314,10 +314,19 @@ class BleTokenController(
         }
     }
 
-    private fun dbSlide(token: String, expiresAt: Long) {
+    /**
+     * Extend a token's expiry — and re-create its row if it's missing (rows
+     * deleted by hand, or issued while the table was unavailable). A plain
+     * UPDATE left such tokens memory-only, so the next restart lost them.
+     */
+    private fun dbSlide(token: String, userId: String, expiresAt: Long) {
         if (!dbReady) return
         try {
-            jdbc.update("UPDATE ble_token SET expires_at = ? WHERE token = ?", Timestamp(expiresAt), token)
+            jdbc.update(
+                "INSERT INTO ble_token (token, user_id, expires_at) VALUES (?, ?, ?) " +
+                        "ON CONFLICT (token) DO UPDATE SET expires_at = EXCLUDED.expires_at",
+                token, UUID.fromString(userId), Timestamp(expiresAt)
+            )
         } catch (e: Exception) {
             logger.warn("BLE token DB slide failed: ${e.message}")
         }
