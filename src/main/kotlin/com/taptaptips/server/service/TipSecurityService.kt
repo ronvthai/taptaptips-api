@@ -154,7 +154,10 @@ class TipSecurityService(
             senderDevices.forEachIndexed { idx, dev ->
                 log.error("     [$idx] deviceId=${dev.id}, name=${dev.deviceName}, keyLength=${dev.publicKey.size}")
             }
-            throw ResponseStatusException(HttpStatus.UNAUTHORIZED, "Bad signature")
+            // 403, not 401: the user IS logged in, the device key just didn't match.
+            // Both apps treat any 401 as "session dead" and log the user out,
+            // which turned a failed tip into a surprise logout.
+            throw ResponseStatusException(HttpStatus.FORBIDDEN, "Bad signature")
         }
 
         log.info("✅ TIP VERIFIED - sender=${req.senderId}, receiver=${req.receiverId}, amount=${req.amount}, device=$verifiedDeviceId ($verifiedDeviceName)")
