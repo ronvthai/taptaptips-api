@@ -10,11 +10,13 @@ import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
+import org.springframework.security.core.context.SecurityContextHolder
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder
 import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.multipart.MultipartFile
 import com.taptaptips.server.service.ReferralService
+import java.util.UUID
 
 @RestController
 @RequestMapping("/auth")
@@ -193,6 +195,32 @@ class AuthController(
                 message = "An unexpected error occurred. Please try again."
             ))
         }
+    }
+
+    /**
+     * Sliding session: swap a still-valid access token for a fresh one.
+     *
+     * The apps call this while the user is actively using them (once a third
+     * of the token's lifetime has passed), so an active user never hits the
+     * token's hard `exp` and gets kicked out mid-use. An idle user stops
+     * refreshing and is logged out by the app's 30-minute inactivity rule;
+     * an expired token can't be refreshed (JwtAuthFilter rejects it before
+     * we get here), so this never extends a dead session.
+     */
+    @PostMapping("/refresh")
+    fun refresh(): ResponseEntity<Any> {
+        val uid = SecurityContextHolder.getContext().authentication?.name
+            ?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            ?: return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                .body(ErrorResponse(error = "Unauthorized"))
+
+        // Account deleted since the token was issued → no new token.
+        if (!userRepo.existsById(uid)) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                .body(ErrorResponse(error = "Unauthorized"))
+        }
+
+        return ResponseEntity.ok(mapOf("accessToken" to jwt.issueAccess(uid)))
     }
 
     @PostMapping("/login")
