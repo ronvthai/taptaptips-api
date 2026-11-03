@@ -47,6 +47,11 @@ class SecurityConfig(
             }
             .authorizeHttpRequests { auth ->
                 auth
+                    // Spring's error page. Uncaught errors (500s, bad JSON, 404s)
+                    // are forwarded here without the user's login attached, so
+                    // locking it made every server error come back as 401 —
+                    // which the apps treat as "session dead" and log out.
+                    .requestMatchers("/error").permitAll()
                     .requestMatchers("/webhooks/**").permitAll()
                     .requestMatchers("/actuator/health", "/actuator/info").permitAll()
                     .requestMatchers("/.well-known/**").permitAll()
