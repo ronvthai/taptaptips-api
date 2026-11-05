@@ -36,9 +36,40 @@ class StripePaymentService(
     private val platformFeePercent: BigDecimal,
 
     @Value("\${stripe.minimum.charge.cents:50}")
-    private val minimumChargeCents: Long
+    private val minimumChargeCents: Long,
+
+    // true  = the RECEIVER is the merchant on the tipper's card (on_behalf_of):
+    //         the receiver's MCC and name reach the card network.
+    // false = TapTapTips is the merchant (platform MCC, currently 4829).
+    // Switch in Render with STRIPE_TIPS_ONBEHALFOF=false — no code change.
+    @Value("\${stripe.tips.onBehalfOf:true}")
+    private val chargeOnBehalfOfReceiver: Boolean
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
+
+    /**
+     * Creates a tip PaymentIntent, charged on behalf of the receiver when
+     * enabled. If Stripe refuses on_behalf_of for this receiver (e.g. their
+     * card_payments capability isn't active yet), it retries once as a
+     * platform charge so the tip still goes through. Card declines are NOT
+     * retried — they're CardException, not InvalidRequestException.
+     */
+    private fun createTipIntent(
+        receiverStripeAccountId: String,
+        build: (onBehalfOf: String?) -> PaymentIntentCreateParams
+    ): PaymentIntent {
+        if (!chargeOnBehalfOfReceiver) return PaymentIntent.create(build(null))
+        return try {
+            PaymentIntent.create(build(receiverStripeAccountId))
+        } catch (e: InvalidRequestException) {
+            val aboutObo = e.param == "on_behalf_of" ||
+                    (e.message ?: "").contains("on_behalf_of") ||
+                    (e.message ?: "").contains("card_payments")
+            if (!aboutObo) throw e
+            logger.warn("⚠️ on_behalf_of refused for $receiverStripeAccountId (${e.message}) — charging as platform")
+            PaymentIntent.create(build(null))
+        }
+    }
 
     // ── Receiver onboarding ──────────────────────────────────────────────────
 
@@ -74,11 +105,11 @@ class StripePaymentService(
                     )
                     .setBusinessProfile(
                         AccountCreateParams.BusinessProfile.builder()
-                            // 7299 = Miscellaneous Personal Services. Not on any
-                            // network cash-advance list. Aligns with the platform
-                            // MCC so issuer risk models see a consistent merchant
-                            // category between platform and connected account.
-                            .setMcc("7299")
+                            // No MCC set here: 7299 is on Stripe's restricted list,
+                            // and Stripe assigns/locks Express MCCs itself after
+                            // review. Tips are charged on the PLATFORM (no
+                            // on_behalf_of), so the receiver's MCC never reaches
+                            // the tipper's card — see createPaymentIntent*.
                             .setProductDescription("In-person cashless tip from a customer to a service provider via TapTapTips marketplace")
                             .setUrl("https://taptaptips.com")
                             .build()
@@ -361,8 +392,9 @@ class StripePaymentService(
             if (applicationFeeCents >= amountCents)
                 throw IllegalArgumentException("Computed fee ($applicationFeeCents) must be less than amount ($amountCents)")
 
-            val paymentIntent = PaymentIntent.create(
+            val paymentIntent = createTipIntent(receiverStripeAccountId) { obo ->
                 PaymentIntentCreateParams.builder()
+                    .apply { if (obo != null) setOnBehalfOf(obo) }
                     .setAmount(amountCents)
                     .setCurrency("usd")
                     .setCustomer(senderCustomerId)
@@ -385,12 +417,11 @@ class StripePaymentService(
                             .setDestination(receiverStripeAccountId)
                             .build()
                     )
-                    // on_behalf_of makes the connected account the "merchant of
-                    // record" for processing purposes (settlement currency,
-                    // regulatory jurisdiction) while the platform descriptor
-                    // still shows on cardholder statements. Recommended by
-                    // Stripe for marketplace destination charges.
-                    .setOnBehalfOf(receiverStripeAccountId)
+                    // on_behalf_of (see createTipIntent): the RECEIVER is the
+                    // merchant, so the card network sees the receiver's MCC
+                    // (e.g. 7299 personal services) instead of the platform's
+                    // 4829, which issuers treat as a cash advance.
+                    // The tip goes to the receiver via transfer_data.
                     .putMetadata("sender_id",          senderId.toString())
                     .putMetadata("receiver_id",        receiverId.toString())
                     .putMetadata("tip_nonce",          tipNonce)
@@ -399,8 +430,8 @@ class StripePaymentService(
                     .putMetadata("receiver_net_cents", breakdown.receiverGetsCents.toString())
                     .putMetadata("charge_type",        "marketplace_tip")
                     .build()
-            )
-            logger.info("✅ PaymentIntent ${paymentIntent.id} status=${paymentIntent.status}")
+            }
+            logger.info("✅ PaymentIntent ${paymentIntent.id} status=${paymentIntent.status} onBehalfOf=${paymentIntent.onBehalfOf}")
             return paymentIntent
         } catch (e: StripeException) {
             logger.error("❌ Failed to create PaymentIntent: ${e.message}", e)
@@ -428,18 +459,18 @@ class StripePaymentService(
                 throw IllegalArgumentException("Computed fee ($applicationFeeCents) must be less than amount ($amountCents)")
  
             // confirm=false — client confirms via Stripe iOS SDK
-            val paymentIntent = PaymentIntent.create(
+            val paymentIntent = createTipIntent(receiverStripeAccountId) { obo ->
                 PaymentIntentCreateParams.builder()
+                    .apply { if (obo != null) setOnBehalfOf(obo) }
                     .setAmount(amountCents)
                     .setCurrency("usd")
                     .setCustomer(senderCustomerId)
                     .setPaymentMethod(paymentMethodId)
                     // confirm intentionally omitted (defaults to false)
                     .setApplicationFeeAmount(applicationFeeCents)
-                    // See createPaymentIntentWithSavedMethod for rationale on
-                    // suffix, description, and on_behalf_of. These three fields
-                    // together signal to issuers that this is a marketplace
-                    // tip, not a P2P transfer, reducing cash-advance flags.
+                    // See createPaymentIntentWithSavedMethod: suffix + description
+                    // mark this as a tip; on_behalf_of (when enabled) makes the
+                    // receiver the merchant of record.
                     .setStatementDescriptorSuffix("TIP")
                     .setDescription("TapTapTips in-person tip to service provider")
                     .setTransferData(
@@ -447,7 +478,6 @@ class StripePaymentService(
                             .setDestination(receiverStripeAccountId)
                             .build()
                     )
-                    .setOnBehalfOf(receiverStripeAccountId)
                     .putMetadata("sender_id",          senderId.toString())
                     .putMetadata("receiver_id",        receiverId.toString())
                     .putMetadata("tip_nonce",          tipNonce)
@@ -456,8 +486,8 @@ class StripePaymentService(
                     .putMetadata("receiver_net_cents", breakdown.receiverGetsCents.toString())
                     .putMetadata("charge_type",        "marketplace_tip")
                     .build()
-            )
-            logger.info("✅ Unconfirmed PaymentIntent ${paymentIntent.id} created for client confirmation")
+            }
+            logger.info("✅ Unconfirmed PaymentIntent ${paymentIntent.id} created for client confirmation (onBehalfOf=${paymentIntent.onBehalfOf})")
             return paymentIntent
         } catch (e: StripeException) {
             logger.error("❌ Failed to create unconfirmed PaymentIntent: ${e.message}", e)

@@ -1,7 +1,6 @@
 package com.taptaptips.server.web
 
 import com.taptaptips.server.service.ReferralService
-import com.taptaptips.server.service.RuntimeSettings
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.http.CacheControl
 import org.springframework.http.MediaType
@@ -25,19 +24,23 @@ import java.time.Duration
  * While the program is off, or for an unknown code, it's a plain download page.
  *
  * Config:
- *   App Store link           set on the admin page (/admin)
+ *   referral.appStoreUrl     https://apps.apple.com/app/id<your Apple ID>   (required for the iPhone button)
  *   referral.playPackage     com.app.taptaptips
  */
 @RestController
 class ReferralLandingController(
     private val referrals: ReferralService,
-    private val settings: RuntimeSettings,
+    @Value("\${referral.appStoreUrl:}") private val appStoreUrl: String,
     @Value("\${referral.playPackage:com.app.taptaptips}") private val playPackage: String
 ) {
     private val codeRegex = Regex("^[A-Z0-9]{4,12}$")
 
-    /** App Store link — set on the admin page; RuntimeSettings validates it and falls back to the real listing. */
-    private fun storeUrl(): String = settings.string(RuntimeSettings.REFERRAL_APP_STORE_URL)
+    /** TapTapTips on the App Store (Taptaptips inc). Used when REFERRAL_APPSTOREURL is unset or malformed. */
+    private val defaultStoreUrl = "https://apps.apple.com/app/id6764665388"
+
+    private fun storeUrl(): String =
+        appStoreUrl.trim().trim('"', '\'').takeIf { validStoreUrl.matches(it) } ?: defaultStoreUrl
+    private val validStoreUrl = Regex("^https://(apps|itunes)\\.apple\\.com/[A-Za-z0-9/_.-]*id[0-9]+[A-Za-z0-9?=&_.-]*$")
 
     @GetMapping("/r/{code}", produces = [MediaType.TEXT_HTML_VALUE])
     fun landing(@PathVariable code: String): ResponseEntity<String> {

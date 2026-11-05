@@ -29,12 +29,17 @@ interface TipRepository : JpaRepository<Tip, UUID> {
     ): List<Tip>
 
     // ── FIX: FETCH JOIN eliminates N+1 on sender/receiver display names ──
+    // History lists (received / sent) leave out FAILED tips: the card was
+    // declined, no money moved, and summing them made the Tip Summary total
+    // wrong on every installed app version. The rows stay in the table for
+    // auditing; they're just not shown as tips.
     @Query("""
         SELECT t FROM Tip t
         LEFT JOIN FETCH t.sender
         LEFT JOIN FETCH t.receiver
         WHERE t.receiver.id = :receiverId
           AND t.createdAtLocal BETWEEN :startDate AND :endDate
+          AND t.status <> 'FAILED'
         ORDER BY t.createdAt DESC
     """)
     fun findByReceiver_IdAndCreatedAtLocalBetween(
@@ -50,6 +55,7 @@ interface TipRepository : JpaRepository<Tip, UUID> {
         LEFT JOIN FETCH t.receiver
         WHERE t.sender.id = :senderId
           AND t.createdAtLocal BETWEEN :startDate AND :endDate
+          AND t.status <> 'FAILED'
         ORDER BY t.createdAt DESC
     """)
     fun findBySender_IdAndCreatedAtLocalBetween(
@@ -65,6 +71,7 @@ interface TipRepository : JpaRepository<Tip, UUID> {
         LEFT JOIN FETCH t.receiver
         WHERE t.receiver.id = :receiverId
           AND t.createdAtLocal = :date
+          AND t.status <> 'FAILED'
         ORDER BY t.createdAt DESC
     """)
     fun findByReceiver_IdAndCreatedAtLocal(

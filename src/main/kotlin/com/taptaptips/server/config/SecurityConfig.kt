@@ -6,12 +6,14 @@ import org.springframework.beans.factory.annotation.Value
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.http.HttpMethod
+import org.springframework.http.HttpStatus
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity
 import org.springframework.security.config.http.SessionCreationPolicy
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder
 import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.security.web.SecurityFilterChain
+import org.springframework.security.web.authentication.HttpStatusEntryPoint
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter
 import org.springframework.web.cors.CorsConfiguration
 import org.springframework.web.cors.CorsConfigurationSource
@@ -37,8 +39,19 @@ class SecurityConfig(
             .sessionManagement {
                 it.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
             }
+            // Missing / invalid / expired token → 401 (Spring's default is 403).
+            // Both apps log the user out on 401, so a rejected token now ends
+            // the session cleanly instead of leaving every screen failing.
+            .exceptionHandling {
+                it.authenticationEntryPoint(HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED))
+            }
             .authorizeHttpRequests { auth ->
                 auth
+                    // Spring's error page. Uncaught errors (500s, bad JSON, 404s)
+                    // are forwarded here without the user's login attached, so
+                    // locking it made every server error come back as 401 —
+                    // which the apps treat as "session dead" and log out.
+                    .requestMatchers("/error").permitAll()
                     .requestMatchers("/webhooks/**").permitAll()
                     .requestMatchers("/actuator/health", "/actuator/info").permitAll()
                     .requestMatchers("/.well-known/**").permitAll()

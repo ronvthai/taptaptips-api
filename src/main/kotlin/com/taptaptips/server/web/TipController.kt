@@ -38,7 +38,14 @@ class TipController(
 
     companion object {
         private const val DEFAULT_PAGE_SIZE = 50
-        private const val MAX_PAGE_SIZE     = 200
+        /**
+         * Every history request returns up to this many tips, whatever size the
+         * app asks for. Installed apps only ever read page 0 of a date range
+         * (Android even asks for size=50), so a week with more than 50 tips
+         * showed an incomplete list and total. totalPages is computed from this
+         * size, so apps that DO page (the home-screen daily total) still work.
+         */
+        private const val PAGE_SIZE         = 1000
     }
 
     private fun authUserId(): UUID =
@@ -129,6 +136,24 @@ class TipController(
 
             tip.paymentIntentId = paymentIntent.id
             tip.updatedAt       = Instant.now()
+            // Off-session confirm is synchronous for cards: record the outcome
+            // now instead of leaving the tip PENDING until charge.succeeded
+            // arrives (or forever, if that webhook is ever missed). Same as the
+            // held path below. The webhook still runs, re-sets SUCCEEDED
+            // idempotently and sends the receiver's notification.
+            when (paymentIntent.status) {
+                "succeeded" -> {
+                    tip.status   = TipStatus.SUCCEEDED
+                    tip.chargeId = paymentIntent.latestCharge
+                }
+                "requires_payment_method", "canceled" -> {
+                    // Declined without an exception (rare). Never report it as sent.
+                    tip.status        = TipStatus.FAILED
+                    tip.failureReason = paymentIntent.lastPaymentError?.message ?: "Payment ${paymentIntent.status}"
+                    tips.save(tip)
+                    return TipResult("PAYMENT_FAILED")
+                }
+            }
             tips.save(tip)
 
             // Notification intentionally removed — webhook fires after Stripe confirms
@@ -247,7 +272,7 @@ class TipController(
         @RequestParam(defaultValue = "$DEFAULT_PAGE_SIZE") size: Int
     ): TipPageResult {
         val receiverId = authUserId()
-        val pageable   = PageRequest.of(page, size.coerceAtMost(MAX_PAGE_SIZE), Sort.by("createdAt").descending())
+        val pageable   = PageRequest.of(page, PAGE_SIZE, Sort.by("createdAt").descending())
 
         val tipPage = when {
             startDate != null && endDate != null ->
@@ -277,7 +302,7 @@ class TipController(
         @RequestParam(defaultValue = "$DEFAULT_PAGE_SIZE") size: Int
     ): TipPageResult {
         val senderId = authUserId()
-        val pageable = PageRequest.of(page, size.coerceAtMost(MAX_PAGE_SIZE), Sort.by("createdAt").descending())
+        val pageable = PageRequest.of(page, PAGE_SIZE, Sort.by("createdAt").descending())
 
         val start = startDate?.let { LocalDate.parse(it) } ?: LocalDate.now().withDayOfMonth(1)
         val end   = endDate?.let   { LocalDate.parse(it) } ?: LocalDate.now()
