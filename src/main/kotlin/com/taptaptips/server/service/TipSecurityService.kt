@@ -22,7 +22,9 @@ class TipSecurityService(
     private val devices: DeviceRepository,
     private val tips: TipRepository,
     private val verifier: Ed25519VerifierByteKey,
-    @Value("\${tips.maxAmount:500}") private val maxAmount: BigDecimal,
+    // Max CHARGED amount. Apps allow a $500 tip; with "cover the fees" on, the
+    // charge is grossed up (~$532), so the server ceiling sits above the app's.
+    @Value("\${tips.maxAmount:600}") private val maxAmount: BigDecimal,
     @Value("\${tips.clockSkewSeconds:120}") private val skewSeconds: Long
 ) {
     private val log = LoggerFactory.getLogger(TipSecurityService::class.java)
