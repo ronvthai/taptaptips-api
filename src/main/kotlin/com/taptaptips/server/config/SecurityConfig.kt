@@ -75,6 +75,9 @@ class SecurityConfig(
                     // not the app login. See AdminController.
                     .requestMatchers(HttpMethod.GET, "/admin", "/admin/api/settings").permitAll()
                     .requestMatchers(HttpMethod.POST, "/admin/api/**").permitAll()
+                    // Admin console (read-only reports): also its own password check
+                    // (ADMIN_PASSWORD, X-Admin-Token header). See AdminConsoleController.
+                    .requestMatchers("/console", "/console/**").permitAll()
                     .anyRequest().authenticated()
             }
             .addFilterBefore(rateLimitFilter, UsernamePasswordAuthenticationFilter::class.java)

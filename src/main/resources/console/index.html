@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>TapTapTips Admin</title>
+  <link rel="stylesheet" href="/console/console.css">
+</head>
+<body>
+  <!-- Login -->
+  <main id="login-view" class="login" hidden>
+    <form id="login-form" class="login-card" autocomplete="off">
+      <div class="brand"><span class="brand-mark">T</span> TapTapTips Admin</div>
+      <label for="password">Admin password</label>
+      <input id="password" type="password" autocomplete="current-password" required autofocus>
+      <button type="submit" id="login-btn">Sign in</button>
+      <p id="login-error" class="error" role="alert"></p>
+      <p class="hint">Read-only. Sessions last 8 hours.</p>
+    </form>
+  </main>
+
+  <!-- App -->
+  <div id="app-view" hidden>
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">T</span> TapTapTips Admin <span id="env-badge" class="badge warn" hidden>Stripe test mode</span></div>
+      <nav class="tabs" aria-label="Sections">
+        <a href="#/overview" data-tab="overview">Overview</a>
+        <a href="#/users" data-tab="users">Users</a>
+      </nav>
+      <div class="topbar-actions">
+        <span id="updated" class="muted small"></span>
+        <button type="button" id="refresh-btn" class="ghost">Refresh</button>
+        <button type="button" id="logout-btn" class="ghost">Sign out</button>
+      </div>
+    </header>
+
+    <!-- Overview -->
+    <section id="overview-view" class="page" hidden>
+      <h2 class="section-title">Users</h2>
+      <div id="user-cards" class="cards"></div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Sign-ups, last 90 days</h3>
+          <div class="seg" role="group" aria-label="Chart mode">
+            <button type="button" data-chart="daily" class="on">Per day</button>
+            <button type="button" data-chart="total">Total users</button>
+          </div>
+        </div>
+        <div id="signup-chart" class="chart"></div>
+      </div>
+
+      <h2 class="section-title">Tips</h2>
+      <div id="tip-cards" class="cards"></div>
+
+      <div class="grid2">
+        <div class="panel">
+          <h3>Top receivers, last 30 days</h3>
+          <div id="top-receivers"></div>
+        </div>
+        <div class="panel">
+          <h3>Top senders, last 30 days</h3>
+          <div id="top-senders"></div>
+        </div>
+      </div>
+      <p id="tracking-note" class="muted small" hidden></p>
+    </section>
+
+    <!-- Users -->
+    <section id="users-view" class="page" hidden>
+      <div class="filters">
+        <input id="f-q" type="search" placeholder="Search name, email or user ID" aria-label="Search">
+        <select id="f-bank" aria-label="Bank">
+          <option value="">Bank: any</option>
+          <option value="linked">Bank linked</option>
+          <option value="started">Bank setup started</option>
+          <option value="none">No bank</option>
+        </select>
+        <select id="f-card" aria-label="Card">
+          <option value="">Card: any</option>
+          <option value="yes">Card on file</option>
+          <option value="no">No card</option>
+        </select>
+        <select id="f-receiver" aria-label="Receives tips">
+          <option value="">Receives tips: any</option>
+          <option value="yes">Receives tips</option>
+          <option value="no">Doesn't receive</option>
+        </select>
+        <select id="f-platform" aria-label="Platform">
+          <option value="">Platform: any</option>
+          <option value="ios">iPhone</option>
+          <option value="android">Android</option>
+          <option value="unknown">Unknown</option>
+        </select>
+        <select id="f-active" aria-label="Activity">
+          <option value="">Activity: any</option>
+          <option value="7">Active last 7 days</option>
+          <option value="30">Active last 30 days</option>
+          <option value="inactive30">Inactive 30+ days</option>
+          <option value="never">No activity recorded</option>
+        </select>
+        <select id="f-suspended" aria-label="Suspended">
+          <option value="">Suspended: any</option>
+          <option value="yes">Suspended</option>
+          <option value="no">Not suspended</option>
+        </select>
+        <label class="date">Joined from <input id="f-from" type="date"></label>
+        <label class="date">to <input id="f-to" type="date"></label>
+        <button type="button" id="f-clear" class="ghost">Clear</button>
+        <button type="button" id="export-btn">Export CSV</button>
+      </div>
+
+      <div class="table-meta">
+        <span id="users-count" class="muted"></span>
+        <label class="muted small">Rows
+          <select id="page-size">
+            <option>25</option><option selected>50</option><option>100</option><option>200</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="table-wrap">
+        <table class="users">
+          <thead>
+            <tr>
+              <th data-sort="name">Name</th>
+              <th data-sort="email">Email</th>
+              <th data-sort="joined">Joined</th>
+              <th data-sort="lastActive">Last active</th>
+              <th data-sort="bank">Bank</th>
+              <th data-sort="card">Card</th>
+              <th>Platform</th>
+              <th data-sort="sentCount" class="num">Sent</th>
+              <th data-sort="sentAmount" class="num">Sent $</th>
+              <th data-sort="recvCount" class="num">Received</th>
+              <th data-sort="recvAmount" class="num">Received $</th>
+            </tr>
+          </thead>
+          <tbody id="users-body"></tbody>
+        </table>
+      </div>
+
+      <div class="pager">
+        <button type="button" id="prev-btn" class="ghost">← Previous</button>
+        <span id="page-label" class="muted"></span>
+        <button type="button" id="next-btn" class="ghost">Next →</button>
+      </div>
+    </section>
+
+    <!-- User detail -->
+    <section id="user-view" class="page" hidden>
+      <a href="#/users" id="back-link" class="back">← All users</a>
+      <div id="user-detail"></div>
+    </section>
+
+    <div id="toast" class="toast" role="status" hidden></div>
+  </div>
+
+  <script src="/console/console.js"></script>
+</body>
+</html>
