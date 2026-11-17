@@ -43,6 +43,8 @@ class AuthController(
         const val MIN_PASSWORD_LENGTH     = 8
         const val MAX_PASSWORD_LENGTH     = 128  // prevents bcrypt DoS on very long inputs
         const val MAX_AVATAR_BYTES        = 2_000_000
+        const val SUSPENDED_MESSAGE       =
+            "This account has been suspended. Contact support@taptaptips.com if you think this is a mistake."
     }
 
     data class LoginReq(val email: String, val password: String)
@@ -220,6 +222,15 @@ class AuthController(
                 .body(ErrorResponse(error = "Unauthorized"))
         }
 
+        // Suspended since the token was issued → no new token.
+        if (userRepo.findSuspendedById(uid) == true) {
+            logger.warn("🚫 Refresh refused: user $uid is suspended")
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(ErrorResponse(
+                error = "Account suspended",
+                message = SUSPENDED_MESSAGE
+            ))
+        }
+
         return ResponseEntity.ok(mapOf("accessToken" to jwt.issueAccess(uid)))
     }
 
@@ -278,6 +289,17 @@ class AuthController(
         }
 
         rateLimiter.resetAccountLoginBucket(emailKey)
+
+        // Checked only AFTER the password is correct, so a wrong guess can't
+        // reveal whether an account is suspended.
+        if (u.suspended) {
+            logger.warn("🚫 Login refused: user ${u.id} is suspended (${u.suspensionReason ?: "no reason"})")
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(ErrorResponse(
+                error = "Account suspended",
+                message = SUSPENDED_MESSAGE
+            ))
+        }
+
         logger.info("✅ User ${u.id} logged in successfully")
 
         return try {

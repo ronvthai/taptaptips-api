@@ -24,4 +24,8 @@ interface AppUserRepository : JpaRepository<AppUser, UUID> {
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT u FROM AppUser u WHERE u.id = :id")
     fun findByIdForUpdate(@Param("id") id: UUID): AppUser?
+
+    /** Just the suspended flag — used on every authenticated request (see SuspensionGuard). */
+    @Query("SELECT u.suspended FROM AppUser u WHERE u.id = :id")
+    fun findSuspendedById(@Param("id") id: UUID): Boolean?
 }
