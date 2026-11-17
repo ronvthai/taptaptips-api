@@ -12,7 +12,9 @@ import java.util.UUID
  * [Tip] row created (sender = null), so abandoned checkouts never show up in
  * the receiver's history.
  *
- * status: PENDING → SUCCEEDED, or ABANDONED (never paid within 24h).
+ * status: PENDING → SUCCEEDED, FAILED (card declined or blocked by Radar;
+ * the PaymentIntent is canceled so it can't be retried with another card),
+ * or ABANDONED (never paid within 24h).
  */
 @Entity
 @Table(

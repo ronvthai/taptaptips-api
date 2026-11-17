@@ -29,4 +29,8 @@ interface GuestTipRepository : JpaRepository<GuestTip, UUID> {
     @Modifying
     @Query("UPDATE GuestTip g SET g.tipId = :tipId WHERE g.paymentIntentId = :pi")
     fun linkTip(@Param("pi") pi: String, @Param("tipId") tipId: UUID): Int
+
+    /** Declined / blocked guest tips to one receiver since [since]. Card testing shows up here first. */
+    @Query("SELECT COUNT(g) FROM GuestTip g WHERE g.receiverId = :rid AND g.status = 'FAILED' AND g.createdAt >= :since")
+    fun countFailedSince(@Param("rid") receiverId: UUID, @Param("since") since: Instant): Long
 }

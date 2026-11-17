@@ -66,6 +66,10 @@ class RuntimeSettings(
         const val GUEST_MAX_CENTS = "tips.guest.maxCents"
         const val GUEST_PER_IP = "tips.guest.perIpPer10Min"
         const val GUEST_PER_RECEIVER = "tips.guest.perReceiverPerHour"
+        const val GUEST_MAX_FAILS_PER_RECEIVER = "tips.guest.maxFailsPerReceiverPerHour"
+        const val GUEST_3DS_ABOVE_CENTS = "tips.guest.threeDsAboveCents"
+        const val GUEST_NEW_RECEIVER_DAYS = "tips.guest.newReceiverDays"
+        const val GUEST_NEW_RECEIVER_MAX_CENTS = "tips.guest.newReceiverMaxCents"
 
         val DEFS: List<Def> = listOf(
             Def(REFERRAL_ENABLED, Type.BOOL, "Referral program", "Referral program on",
@@ -88,11 +92,26 @@ class RuntimeSettings(
             Def(GUEST_MIN_CENTS, Type.CENTS, "Tip by link (no app)", "Minimum tip",
                 "Smallest tip allowed on the tip page.", "100", 50, 10_000),
             Def(GUEST_MAX_CENTS, Type.CENTS, "Tip by link (no app)", "Maximum tip",
-                "Largest tip allowed on the tip page.", "20000", 100, 100_000),
+                "Largest tip allowed on the tip page.", "10000", 100, 100_000),
             Def(GUEST_PER_IP, Type.NUMBER, "Tip by link (no app)", "Tips per visitor (10 min)",
-                "Limit per internet address, to stop card testing.", "10", 1, 1_000),
+                "Limit per internet address. Venue Wi-Fi and phone carriers put many people " +
+                    "behind one address, so don't set this too low.", "20", 1, 1_000),
             Def(GUEST_PER_RECEIVER, Type.NUMBER, "Tip by link (no app)", "Tips per receiver (1 hour)",
-                "Limit per person being tipped.", "60", 1, 10_000)
+                "Limit per person being tipped. Busy bartenders can get many tips an hour.", "30", 1, 10_000),
+            Def(GUEST_MAX_FAILS_PER_RECEIVER, Type.NUMBER, "Tip by link (no app)",
+                "Failed tips before a receiver's link pauses (1 hour)",
+                "Declined or blocked cards to one person in the last hour. Past this, their tip page " +
+                    "stops taking payments until the hour passes. Many different failing cards is " +
+                    "what card testing looks like.", "3", 1, 100),
+            Def(GUEST_3DS_ABOVE_CENTS, Type.CENTS, "Tip by link (no app)", "Ask for bank verification above",
+                "Tips above this amount ask the card's bank to verify the payer (3D Secure). " +
+                    "Stolen cards usually fail it. \$0 asks on every tip.", "4000", 0, 100_000),
+            Def(GUEST_NEW_RECEIVER_DAYS, Type.NUMBER, "Tip by link (no app)", "New account period (days)",
+                "Accounts younger than this get the new-account maximum below, and every tip to them " +
+                    "asks for bank verification. Fraud accounts are usually used within days of " +
+                    "sign-up. 0 turns this off.", "7", 0, 90),
+            Def(GUEST_NEW_RECEIVER_MAX_CENTS, Type.CENTS, "Tip by link (no app)", "Maximum tip to a new account",
+                "Largest tip by link to an account still in its new account period.", "2500", 100, 100_000)
         )
 
         private val BY_KEY = DEFS.associateBy { it.key }

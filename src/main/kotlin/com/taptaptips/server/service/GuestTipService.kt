@@ -44,7 +44,14 @@ import java.util.concurrent.ConcurrentHashMap
  *     sweep as backup) a normal Tip row is created (sender = null) and the
  *     receiver gets a push.
  *
- * Abuse limits: amount min/max, requests per IP and per receiver.
+ * Abuse limits (all changeable on /admin):
+ *  - amount min/max, and a lower max for receivers in their new account period
+ *  - requests per IP (trusted IP, see ClientIp) and per receiver
+ *  - a receiver's link pauses after too many FAILED tips in an hour
+ *    (many different failing cards = card testing / stolen-card cash-out)
+ *  - 3D Secure above a set amount, and on every tip to a new account
+ *  - a declined PaymentIntent is canceled (see [onPaymentFailed]) so its
+ *    client secret can't be reused to try card after card past our limits
  * Turn off entirely with TIPS_GUEST_ENABLED=false.
  */
 @Service
@@ -68,6 +75,10 @@ class GuestTipService(
     val maxCents get() = settings.long(RuntimeSettings.GUEST_MAX_CENTS)
     private val perIpPer10Min get() = settings.int(RuntimeSettings.GUEST_PER_IP)
     private val perReceiverPerHour get() = settings.int(RuntimeSettings.GUEST_PER_RECEIVER)
+    private val maxFailsPerReceiverPerHour get() = settings.int(RuntimeSettings.GUEST_MAX_FAILS_PER_RECEIVER)
+    private val threeDsAboveCents get() = settings.long(RuntimeSettings.GUEST_3DS_ABOVE_CENTS)
+    private val newReceiverDays get() = settings.long(RuntimeSettings.GUEST_NEW_RECEIVER_DAYS)
+    private val newReceiverMaxCents get() = settings.long(RuntimeSettings.GUEST_NEW_RECEIVER_MAX_CENTS)
     private val codeRegex = Regex("^[A-Z0-9]{4,12}$")
 
     data class Receiver(val user: AppUser, val code: String) {
@@ -117,40 +128,81 @@ class GuestTipService(
 
     // ── Payment ──────────────────────────────────────────────────────────────
 
+    /** True while [user] is in the new account period (stricter limits for guest tips). */
+    fun isNewReceiver(user: AppUser): Boolean {
+        val days = newReceiverDays
+        return days > 0 && user.createdAt.isAfter(Instant.now().minus(Duration.ofDays(days)))
+    }
+
+    /** Largest tip this receiver can get by link right now. */
+    fun maxCentsFor(user: AppUser): Long =
+        if (isNewReceiver(user)) minOf(maxCents, newReceiverMaxCents) else maxCents
+
     /** Creates the PaymentIntent for the web page. Returns its client secret. */
-    fun createIntent(rawCode: String, amountCents: Long, clientIp: String): String {
+    fun createIntent(rawCode: String, amountCents: Long, clientIp: String, userAgent: String = ""): String {
         val r = findReceiver(rawCode) ?: throw GuestTipException("This tip link isn't valid.")
         unavailableReason(r)?.let { throw GuestTipException(it) }
+        val newReceiver = isNewReceiver(r.user)
+        val max = maxCentsFor(r.user)
         if (amountCents < minCents) throw GuestTipException("The minimum tip is ${money(minCents)}.")
-        if (amountCents > maxCents) throw GuestTipException("The maximum tip is ${money(maxCents)}.")
+        if (amountCents > max) throw GuestTipException("The maximum tip is ${money(max)}.")
+
+        val recentFails = guestTips.countFailedSince(r.user.id, Instant.now().minus(Duration.ofHours(1)))
+        if (recentFails >= maxFailsPerReceiverPerHour) {
+            log.warn("🚨 Guest tip refused: receiver ${r.user.id} has $recentFails failed tips in the last hour " +
+                "(ip=$clientIp)")
+            throw GuestTipException("${r.publicName} can't receive tips by link right now. Please try again later.")
+        }
         if (!allow("ip:$clientIp", perIpPer10Min, Duration.ofMinutes(10)) ||
             !allow("rcv:${r.user.id}", perReceiverPerHour, Duration.ofHours(1))) {
+            log.warn("⚠️ Guest tip rate limit: receiver=${r.user.id} ip=$clientIp")
             throw GuestTipException("Too many attempts. Please wait a few minutes and try again.")
         }
 
         val fees = stripe.calculateFeeBreakdown(BigDecimal(amountCents).movePointLeft(2))
         if (fees.receiverGetsCents <= 0) throw GuestTipException("That amount is too small to send.")
 
-        val pi = PaymentIntent.create(
-            PaymentIntentCreateParams.builder()
-                .setAmount(amountCents)
-                .setCurrency("usd")
-                .addPaymentMethodType("card")           // includes Apple Pay & Google Pay
-                .setApplicationFeeAmount(fees.totalFeeCents)
-                .setTransferData(
-                    PaymentIntentCreateParams.TransferData.builder()
-                        .setDestination(r.user.stripeAccountId!!).build()
-                )
-                // No on_behalf_of: charged on the platform (purchase MCC),
-                // same as app tips — avoids receivers' MCC 4829.
-                .setStatementDescriptorSuffix("TIP")
-                .setDescription("TapTapTips guest tip to ${r.publicName}")
-                .putMetadata("charge_type", "guest_tip")
-                .putMetadata("receiver_id", r.user.id.toString())
-                .putMetadata("tip_code", r.code)
-                .putMetadata("receiver_net_cents", fees.receiverGetsCents.toString())
-                .build()
-        )
+        // Ask the card's bank to verify the payer. Stolen cards usually fail this,
+        // and when it passes, fraud chargeback liability generally moves to the bank.
+        val ask3ds = newReceiver || amountCents > threeDsAboveCents
+
+        val params = PaymentIntentCreateParams.builder()
+            .setAmount(amountCents)
+            .setCurrency("usd")
+            .addPaymentMethodType("card")           // includes Apple Pay & Google Pay
+            .setApplicationFeeAmount(fees.totalFeeCents)
+            .setTransferData(
+                PaymentIntentCreateParams.TransferData.builder()
+                    .setDestination(r.user.stripeAccountId!!).build()
+            )
+            // No on_behalf_of: charged on the platform (purchase MCC),
+            // same as app tips — avoids receivers' MCC 4829.
+            .setStatementDescriptorSuffix("TIP")
+            .setDescription("TapTapTips guest tip to ${r.publicName}")
+            .putMetadata("charge_type", "guest_tip")
+            .putMetadata("receiver_id", r.user.id.toString())
+            .putMetadata("tip_code", r.code)
+            .putMetadata("receiver_net_cents", fees.receiverGetsCents.toString())
+            // For investigating fraud later (Stripe keeps these; we don't store them).
+            .putMetadata("guest_ip", clientIp.take(45))
+            .putMetadata("guest_ua", userAgent.take(450))
+            .putMetadata("receiver_new_account", newReceiver.toString())
+
+        if (ask3ds) {
+            params.setPaymentMethodOptions(
+                PaymentIntentCreateParams.PaymentMethodOptions.builder()
+                    .setCard(
+                        PaymentIntentCreateParams.PaymentMethodOptions.Card.builder()
+                            .setRequestThreeDSecure(
+                                PaymentIntentCreateParams.PaymentMethodOptions.Card.RequestThreeDSecure.ANY
+                            )
+                            .build()
+                    )
+                    .build()
+            )
+        }
+
+        val pi = PaymentIntent.create(params.build())
         guestTips.save(
             GuestTip(
                 paymentIntentId = pi.id,
@@ -159,8 +211,42 @@ class GuestTipService(
                 netCents = fees.receiverGetsCents
             )
         )
-        log.info("🌐 Guest tip intent ${pi.id}: ${money(amountCents)} → ${r.user.id}")
+        log.info("🌐 Guest tip intent ${pi.id}: ${money(amountCents)} → ${r.user.id} " +
+            "ip=$clientIp 3ds=$ask3ds newReceiver=$newReceiver ua=\"${userAgent.take(120)}\"")
         return pi.clientSecret
+    }
+
+    /**
+     * Called from the Stripe webhook when a guest-tip payment fails (declined,
+     * or blocked by Radar). Cancels the PaymentIntent so the same client secret
+     * can't be used to try more cards straight against Stripe — every new card
+     * then needs a new, rate-limited [createIntent]. Records the failure so
+     * [maxFailsPerReceiverPerHour] can pause the receiver's link.
+     */
+    fun onPaymentFailed(paymentIntentId: String, reason: String?) {
+        val g = guestTips.findByPaymentIntentId(paymentIntentId) ?: return
+        if (g.status != "PENDING") return
+
+        // Cancel first. If it can't be canceled (it went on to succeed or is
+        // processing), leave it PENDING so finalize() records it normally.
+        val canceled = try {
+            PaymentIntent.retrieve(paymentIntentId).cancel()
+            true
+        } catch (e: Exception) {
+            log.warn("Guest tip $paymentIntentId failed but couldn't be canceled: ${e.message}")
+            false
+        }
+        if (!canceled) return
+
+        guestTips.claim(paymentIntentId, "FAILED", Instant.now())
+        val fails = guestTips.countFailedSince(g.receiverId, Instant.now().minus(Duration.ofHours(1)))
+        log.warn("❌ Guest tip $paymentIntentId failed (${reason ?: "no reason"}) → receiver ${g.receiverId}, " +
+            "$fails failed in the last hour")
+        if (fails >= maxFailsPerReceiverPerHour) {
+            log.error("🚨 POSSIBLE CARD TESTING: receiver ${g.receiverId} has $fails failed guest tips in the " +
+                "last hour. Their tip link is paused. Review them in Stripe (Connected accounts) and " +
+                "consider pausing payouts.")
+        }
     }
 
     /**
@@ -283,7 +369,13 @@ class GuestTipService(
             if (q.size >= limit) return false
             q.addLast(now)
         }
-        if (hits.size > 50_000) hits.clear()   // crude memory bound
+        // Memory bound. Drop only stale keys — clearing everything would let a
+        // flood of requests wipe the per-receiver counters too.
+        if (hits.size > 50_000) {
+            val cutoff = now - Duration.ofHours(1).toMillis()
+            hits.entries.removeIf { (_, dq) -> synchronized(dq) { dq.isEmpty() || dq.peekLast() < cutoff } }
+            if (hits.size > 50_000) hits.keys.removeIf { it.startsWith("ip:") }
+        }
         return true
     }
 

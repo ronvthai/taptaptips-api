@@ -1,5 +1,6 @@
 package com.taptaptips.server.web
 
+import com.taptaptips.server.security.ClientIp
 import com.taptaptips.server.service.GuestTipService
 import jakarta.servlet.http.HttpServletRequest
 import org.slf4j.LoggerFactory
@@ -28,6 +29,7 @@ import java.util.UUID
 @RestController
 class GuestTipController(
     private val guest: GuestTipService,
+    private val clientIp: ClientIp,
     @Value("\${stripe.publishable.key}") private val publishableKey: String
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
@@ -77,7 +79,10 @@ class GuestTipController(
         val cents = (body["amountCents"] as? Number)?.toLong()
             ?: return ResponseEntity.badRequest().body(mapOf("error" to "Choose an amount."))
         return try {
-            val secret = guest.createIntent(code, cents, clientIp(request))
+            val secret = guest.createIntent(
+                code, cents, clientIp.of(request),
+                request.getHeader("User-Agent")?.take(300) ?: ""
+            )
             ResponseEntity.ok(mapOf("clientSecret" to secret))
         } catch (e: GuestTipService.GuestTipException) {
             ResponseEntity.badRequest().body(mapOf("error" to e.message))
@@ -96,10 +101,6 @@ class GuestTipController(
         return mapOf("status" to status, "amountCents" to cents)
     }
 
-    private fun clientIp(req: HttpServletRequest): String =
-        req.getHeader("X-Forwarded-For")?.split(",")?.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
-            ?: req.remoteAddr ?: "unknown"
-
     // ── HTML ─────────────────────────────────────────────────────────────────
     // Note: the JS avoids "$" (Kotlin string templates); $ is a dollar sign.
 
@@ -113,7 +114,7 @@ class GuestTipController(
         else "<div class=\"avatar initials\">${esc(r.publicName.take(1))}</div>"
         return shell("Tip $name", """
 <main id="app" data-code="$code" data-pk="${esc(publishableKey)}" data-name="$name"
-      data-min="${guest.minCents}" data-max="${guest.maxCents}">
+      data-min="${guest.minCents}" data-max="${guest.maxCentsFor(r.user)}">
   <section id="form">
     $photo
     <h1>Tip $name</h1>

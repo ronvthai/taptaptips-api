@@ -7,6 +7,7 @@ import com.stripe.net.Webhook
 import com.taptaptips.server.domain.TipStatus
 import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.repo.TipRepository
+import com.taptaptips.server.service.GuestTipService
 import com.taptaptips.server.service.HeldTipService
 import com.taptaptips.server.service.NotificationService
 import com.taptaptips.server.service.ReferralService
@@ -26,6 +27,7 @@ class StripeWebhookController(
     private val notificationService: NotificationService,
     private val heldTipService: HeldTipService,
     private val referralService: ReferralService,
+    private val guestTipService: GuestTipService,
 
     @Value("\${stripe.webhook.secret}")
     private val webhookSecret: String,
@@ -314,6 +316,12 @@ class StripeWebhookController(
         val obj = extractStripeObject(event) ?: return
         val paymentIntent = obj as? PaymentIntent ?: run {
             logger.warn("⚠️ payment_intent.payment_failed but data.object is ${obj.javaClass.name}")
+            return
+        }
+
+        // Guest tips (web tip page) carry charge_type=guest_tip, not tip_nonce.
+        if (paymentIntent.metadata["charge_type"] == "guest_tip") {
+            guestTipService.onPaymentFailed(paymentIntent.id, paymentIntent.lastPaymentError?.message)
             return
         }
 

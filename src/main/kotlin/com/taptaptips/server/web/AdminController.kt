@@ -1,5 +1,6 @@
 package com.taptaptips.server.web
 
+import com.taptaptips.server.security.ClientIp
 import com.taptaptips.server.service.RuntimeSettings
 import jakarta.servlet.http.HttpServletRequest
 import org.slf4j.LoggerFactory
@@ -32,6 +33,7 @@ import java.util.concurrent.ConcurrentHashMap
 @RestController
 class AdminController(
     private val settings: RuntimeSettings,
+    private val clientIpResolver: ClientIp,
     @Value("\${admin.password:}") private val adminPassword: String
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
@@ -132,9 +134,7 @@ class AdminController(
         synchronized(q) { q.addLast(Instant.now()) }
     }
 
-    private fun clientIp(req: HttpServletRequest): String =
-        req.getHeader("X-Forwarded-For")?.split(",")?.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
-            ?: req.remoteAddr ?: "unknown"
+    private fun clientIp(req: HttpServletRequest): String = clientIpResolver.of(req)
 
     // ── HTML ─────────────────────────────────────────────────────────────────
     // The JS never uses a dollar sign literally (Kotlin string templates);
