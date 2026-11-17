@@ -6,6 +6,7 @@ import org.springframework.beans.factory.annotation.Value
 import org.springframework.mail.javamail.JavaMailSender
 import org.springframework.mail.javamail.MimeMessageHelper
 import org.springframework.stereotype.Service
+import java.util.concurrent.Executors
 
 @Service
 class EmailService(
@@ -21,6 +22,36 @@ class EmailService(
     
     @Value("\${app.frontend.url:http://localhost:3000}")
     private lateinit var frontendUrl: String
+
+    /** Where fraud alerts go. Set APP_ALERT_EMAIL in Render; blank = log only. */
+    @Value("\${app.alert-email:}")
+    private lateinit var alertEmail: String
+
+    private val alertSender = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "admin-alert-mail").apply { isDaemon = true }
+    }
+
+    /**
+     * Plain-text alert to APP_ALERT_EMAIL, sent in the background so it never
+     * slows down or breaks the request that triggered it.
+     */
+    fun sendAdminAlertAsync(subject: String, body: String) {
+        val to = alertEmail.trim()
+        if (to.isEmpty()) return
+        alertSender.execute {
+            try {
+                val message: MimeMessage = mailSender.createMimeMessage()
+                val helper = MimeMessageHelper(message, false, "UTF-8")
+                helper.setFrom(fromEmail, appName)
+                helper.setTo(to)
+                helper.setSubject(subject.take(200))
+                helper.setText(body)
+                mailSender.send(message)
+            } catch (e: Exception) {
+                logger.error("❌ Failed to send admin alert email: ${e.message}")
+            }
+        }
+    }
     
     /**
      * Send a password reset email

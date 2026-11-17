@@ -70,6 +70,8 @@ class RuntimeSettings(
         const val GUEST_3DS_ABOVE_CENTS = "tips.guest.threeDsAboveCents"
         const val GUEST_NEW_RECEIVER_DAYS = "tips.guest.newReceiverDays"
         const val GUEST_NEW_RECEIVER_MAX_CENTS = "tips.guest.newReceiverMaxCents"
+        const val FRAUD_SUSPEND_ON_IP_MATCH = "fraud.suspendOnBannedIp"
+        const val FRAUD_SHARED_BANK_ALERT = "fraud.sharedBankAlertUsers"
 
         val DEFS: List<Def> = listOf(
             Def(REFERRAL_ENABLED, Type.BOOL, "Referral program", "Referral program on",
@@ -111,7 +113,17 @@ class RuntimeSettings(
                     "asks for bank verification. Fraud accounts are usually used within days of " +
                     "sign-up. 0 turns this off.", "7", 0, 90),
             Def(GUEST_NEW_RECEIVER_MAX_CENTS, Type.CENTS, "Tip by link (no app)", "Maximum tip to a new account",
-                "Largest tip by link to an account still in its new account period.", "2500", 100, 100_000)
+                "Largest tip by link to an account still in its new account period.", "2500", 100, 100_000),
+
+            Def(FRAUD_SUSPEND_ON_IP_MATCH, Type.BOOL, "Fraud protection", "Suspend sign-ups from banned addresses",
+                "Off: a sign-up or login from a banned user's internet address only sends you an alert. " +
+                    "On: the account is suspended right away. Venue Wi-Fi and phone carriers can put " +
+                    "innocent people on the same address, so leave this off unless you're being targeted.",
+                "false"),
+            Def(FRAUD_SHARED_BANK_ALERT, Type.NUMBER, "Fraud protection", "Alert when one bank account is shared by",
+                "Sends an alert (blocks nothing) when this many TapTapTips accounts use the same payout " +
+                    "bank account. Families share; more than a few can mean one person with fake accounts. " +
+                    "0 turns it off.", "3", 0, 100)
         )
 
         private val BY_KEY = DEFS.associateBy { it.key }

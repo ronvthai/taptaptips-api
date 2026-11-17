@@ -2,7 +2,10 @@ package com.taptaptips.server.web
 
 import com.taptaptips.server.domain.AppUser
 import com.taptaptips.server.repo.AppUserRepository
+import com.taptaptips.server.security.ClientIp
 import com.taptaptips.server.security.JwtService
+import com.taptaptips.server.service.FraudGuardService
+import jakarta.servlet.http.HttpServletRequest
 import com.taptaptips.server.service.DisplayNameModerator
 import com.taptaptips.server.service.RateLimiterService
 import com.taptaptips.server.service.StripePaymentService
@@ -26,7 +29,9 @@ class AuthController(
     private val stripeService: StripePaymentService,
     private val rateLimiter: RateLimiterService,
     private val nameModerator: DisplayNameModerator,
-    private val referralService: ReferralService
+    private val referralService: ReferralService,
+    private val fraudGuard: FraudGuardService,
+    private val clientIp: ClientIp
 ) {
     private val pwd: PasswordEncoder = BCryptPasswordEncoder()
 
@@ -62,7 +67,8 @@ class AuthController(
         @RequestParam displayName: String,
         @RequestParam(defaultValue = "false") wantsToReceiveTips: Boolean,
         @RequestParam("avatar") avatar: MultipartFile,
-        @RequestParam(required = false) referralCode: String?
+        @RequestParam(required = false) referralCode: String?,
+        request: HttpServletRequest
     ): ResponseEntity<Any> {
         logger.info("📝 Registration: email=$email, wantsToReceiveTips=$wantsToReceiveTips")
 
@@ -148,6 +154,16 @@ class AuthController(
             ))
         }
 
+        // ── Ban list ─────────────────────────────────────────────────────────
+        val ip = clientIp.of(request)
+        val fraudCheck = fraudGuard.checkSignup(email, ip)
+        if (fraudCheck.refuse) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(ErrorResponse(
+                error = "Registration not allowed",
+                message = "We couldn't create an account with these details. Contact support if you think this is a mistake."
+            ))
+        }
+
         return try {
             val u = userRepo.save(AppUser(
                 email        = email,
@@ -157,7 +173,8 @@ class AuthController(
                 profilePicture = avatar.bytes
             ))
 
-            logger.info("✅ Created user ${u.id} (with avatar, ${avatar.size} bytes)")
+            logger.info("✅ Created user ${u.id} (with avatar, ${avatar.size} bytes) from $ip")
+            fraudGuard.onRegistered(u, ip, fraudCheck)
             // Referral: a bad or expired code never blocks sign-up — it's just ignored.
             val referralError = referralCode?.takeIf { it.isNotBlank() }
                 ?.let { referralService.applyCode(u, it) }
@@ -169,7 +186,8 @@ class AuthController(
             }
 
             var stripeOnboardingUrl: String? = null
-            if (wantsToReceiveTips) {
+            // No Stripe account for someone the ban list just suspended.
+            if (wantsToReceiveTips && !u.suspended) {
                 try {
                     logger.info("🏦 Creating Stripe account for user ${u.id}...")
                     val stripeAccountId = stripeService.createConnectedAccount(u)
@@ -235,7 +253,7 @@ class AuthController(
     }
 
     @PostMapping("/login")
-    fun login(@RequestBody r: LoginReq): ResponseEntity<Any> {
+    fun login(@RequestBody r: LoginReq, request: HttpServletRequest): ResponseEntity<Any> {
         logger.info("🔐 Login attempt: email=${r.email}")
 
         // ── Reject obviously malformed inputs before hitting the DB ──────────
@@ -289,6 +307,9 @@ class AuthController(
         }
 
         rateLimiter.resetAccountLoginBucket(emailKey)
+
+        // Remember this address; alert (or suspend, per /admin) if it's on the ban list.
+        fraudGuard.onLogin(u, clientIp.of(request))
 
         // Checked only AFTER the password is correct, so a wrong guess can't
         // reveal whether an account is suspended.

@@ -7,6 +7,7 @@ import com.stripe.net.Webhook
 import com.taptaptips.server.domain.TipStatus
 import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.repo.TipRepository
+import com.taptaptips.server.service.FraudGuardService
 import com.taptaptips.server.service.GuestTipService
 import com.taptaptips.server.service.HeldTipService
 import com.taptaptips.server.service.NotificationService
@@ -28,6 +29,7 @@ class StripeWebhookController(
     private val heldTipService: HeldTipService,
     private val referralService: ReferralService,
     private val guestTipService: GuestTipService,
+    private val fraudGuard: FraudGuardService,
 
     @Value("\${stripe.webhook.secret}")
     private val webhookSecret: String,
@@ -77,6 +79,8 @@ class StripeWebhookController(
                 "radar.early_fraud_warning.created" -> handleFraudWarning(event)
                 "review.opened" -> handleReviewOpened(event)
                 "account.updated" -> handleAccountUpdated(event)
+                "account.external_account.created",
+                "account.external_account.updated" -> handleExternalAccountChanged(event)
                 else -> logger.info("⚠️ Unhandled webhook type: ${event.type}")
             }
         } catch (e: Exception) {
@@ -432,10 +436,31 @@ class StripeWebhookController(
             userRepository.save(user)
             logger.info("🔄 User ${user.id} onboarded=$onboarded (from account.updated)")
         }
-        if (onboarded) {
+        // Ban-list check on the payout bank account. May suspend the user,
+        // so it runs BEFORE held tips are released.
+        fraudGuard.onStripeAccountChanged(user)
+
+        if (onboarded && !user.suspended) {
             val n = heldTipService.releaseForReceiver(user.id)
             if (n > 0) logger.info("💸 Released $n held tips for ${user.id} after account.updated")
         }
+    }
+
+    /**
+     * A connected account added or changed its payout bank / debit card.
+     * The event comes from the connected account, so event.account says whose.
+     */
+    private fun handleExternalAccountChanged(event: Event) {
+        val accountId = event.account ?: run {
+            logger.warn("⚠️ ${event.type} without an account id")
+            return
+        }
+        val user = userRepository.findByStripeAccountId(accountId) ?: run {
+            logger.warn("⚠️ ${event.type} for unknown account $accountId")
+            return
+        }
+        logger.info("🏦 Payout account changed for user ${user.id} ($accountId) — checking ban list")
+        fraudGuard.onStripeAccountChanged(user)
     }
 
     private fun checkSenderForFraud(senderId: UUID) {

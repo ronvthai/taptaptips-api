@@ -1,6 +1,7 @@
 package com.taptaptips.server.web
 
 import com.taptaptips.server.security.ClientIp
+import com.taptaptips.server.service.FraudGuardService
 import com.taptaptips.server.service.RuntimeSettings
 import jakarta.servlet.http.HttpServletRequest
 import org.slf4j.LoggerFactory
@@ -17,6 +18,7 @@ import java.security.MessageDigest
 import java.time.Duration
 import java.time.Instant
 import java.util.ArrayDeque
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -34,6 +36,7 @@ import java.util.concurrent.ConcurrentHashMap
 class AdminController(
     private val settings: RuntimeSettings,
     private val clientIpResolver: ClientIp,
+    private val fraudGuard: FraudGuardService,
     @Value("\${admin.password:}") private val adminPassword: String
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
@@ -47,6 +50,8 @@ class AdminController(
 
     data class SetRequest(val key: String = "", val value: String = "")
     data class KeyRequest(val key: String = "")
+    data class BanRequest(val userId: String = "", val reason: String = "", val extraIps: List<String> = emptyList())
+    data class RemoveBanRequest(val type: String = "", val value: String = "")
 
     // ── Page ─────────────────────────────────────────────────────────────────
 
@@ -89,6 +94,43 @@ class AdminController(
             } catch (e: IllegalArgumentException) {
                 ResponseEntity.badRequest().body(mapOf("error" to (e.message ?: "Not allowed.")))
             }
+        }
+
+    // ── Ban list ─────────────────────────────────────────────────────────────
+
+    @GetMapping("/admin/api/bans")
+    fun bans(req: HttpServletRequest): ResponseEntity<Any> =
+        guard(req) { ResponseEntity.ok(banList()) }
+
+    /** Suspend a user and put their email, IPs and payout bank on the ban list. */
+    @PostMapping("/admin/api/ban")
+    fun ban(req: HttpServletRequest, @RequestBody body: BanRequest): ResponseEntity<Any> =
+        guard(req) {
+            val id = runCatching { UUID.fromString(body.userId.trim()) }.getOrNull()
+                ?: return@guard ResponseEntity.badRequest().body(mapOf("error" to "Enter a valid user ID."))
+            if (body.reason.isBlank())
+                return@guard ResponseEntity.badRequest().body(mapOf("error" to "Enter a reason."))
+            try {
+                val result = fraudGuard.ban(id, body.reason.trim(), body.extraIps, "admin@" + clientIp(req))
+                ResponseEntity.ok(mapOf("result" to result, "bans" to banList()))
+            } catch (e: IllegalArgumentException) {
+                ResponseEntity.badRequest().body(mapOf("error" to (e.message ?: "Not found.")))
+            }
+        }
+
+    @PostMapping("/admin/api/bans/remove")
+    fun removeBan(req: HttpServletRequest, @RequestBody body: RemoveBanRequest): ResponseEntity<Any> =
+        guard(req) {
+            fraudGuard.unbanIdentifier(body.type, body.value, "admin@" + clientIp(req))
+            ResponseEntity.ok(banList())
+        }
+
+    private fun banList(): List<Map<String, Any?>> =
+        fraudGuard.list().map {
+            mapOf(
+                "type" to it.type, "value" to it.value, "reason" to it.reason,
+                "sourceUserId" to it.sourceUserId?.toString(), "createdAt" to it.createdAt.toString()
+            )
         }
 
     // ── Password check ───────────────────────────────────────────────────────
@@ -213,6 +255,26 @@ class AdminController(
       <button class="link" id="signOut" style="margin-top:6px">Sign out</button>
     </div>
     <div id="groups"></div>
+
+    <h2>Ban a user</h2>
+    <div class="card"><div class="row">
+      <div class="help">Suspends the account, pauses its Stripe payouts, and puts its email, every
+        internet address it has used and its payout bank account on the ban list. New accounts that
+        match are refused, suspended or flagged automatically. The reason is private: the user only
+        sees "Violation of Terms of Service".</div>
+      <div style="height:12px"></div>
+      <input type="text" id="banUser" placeholder="User ID" aria-label="User ID" autocomplete="off">
+      <div style="height:8px"></div>
+      <input type="text" id="banReason" placeholder="Reason (private)" aria-label="Reason">
+      <div style="height:8px"></div>
+      <input type="text" id="banIps" placeholder="Extra IP addresses, comma-separated (optional)" aria-label="Extra IP addresses">
+      <div style="height:12px"></div>
+      <button id="banBtn">Ban user</button>
+      <div class="msg" id="banMsg" role="status"></div>
+    </div></div>
+
+    <h2>Ban list</h2>
+    <div class="card" id="banList"></div>
   </section>
 </main>
 <script>
@@ -352,10 +414,65 @@ class AdminController(
     return r;
   }
 
+  function renderBans(list) {
+    var box = document.getElementById("banList");
+    box.innerHTML = "";
+    if (!list.length) {
+      var empty = el("div", "row"); empty.appendChild(el("div", "help", "Nothing banned yet."));
+      box.appendChild(empty); return;
+    }
+    list.forEach(function (b) {
+      var r = el("div", "row");
+      var top = el("div", "top");
+      top.appendChild(el("div", "label", b.type + "  " + b.value));
+      var rm = el("button", "link", "Remove");
+      rm.addEventListener("click", function () {
+        if (!confirm("Take " + b.type + " " + b.value + " off the ban list?")) return;
+        api("/admin/api/bans/remove", { type: b.type, value: b.value }).then(renderBans)
+          .catch(function (e) { alert(e.message); });
+      });
+      top.appendChild(rm);
+      r.appendChild(top);
+      r.appendChild(el("div", "help", (b.reason || "") + (b.sourceUserId ? " · user " + b.sourceUserId : "")));
+      r.appendChild(el("div", "meta", "Added " + when(b.createdAt)));
+      box.appendChild(r);
+    });
+  }
+
+  function loadBans() { api("/admin/api/bans").then(renderBans).catch(function () {}); }
+
+  document.getElementById("banBtn").addEventListener("click", function () {
+    var btn = this;
+    var msg = document.getElementById("banMsg");
+    var userId = document.getElementById("banUser").value.trim();
+    var reason = document.getElementById("banReason").value.trim();
+    var ips = document.getElementById("banIps").value.split(",")
+      .map(function (s) { return s.trim(); }).filter(function (s) { return s.length > 0; });
+    if (!userId || !reason) { msg.className = "msg err"; msg.textContent = "Enter a user ID and a reason."; return; }
+    if (!confirm("Ban user " + userId + "? This suspends the account and pauses its payouts.")) return;
+    btn.disabled = true;
+    msg.className = "msg"; msg.textContent = "Banning…";
+    api("/admin/api/ban", { userId: userId, reason: reason, extraIps: ips }).then(function (j) {
+      var r = j.result;
+      var lines = ["Banned " + r.email + ". Added " + r.added.length + " to the ban list" +
+        (r.alreadyBanned.length ? " (" + r.alreadyBanned.length + " were already on it)." : ".")];
+      if (r.payoutsPaused === true) lines.push("Stripe payouts paused.");
+      (r.notes || []).forEach(function (n) { lines.push(n); });
+      msg.className = "msg ok"; msg.textContent = lines.join(" ");
+      renderBans(j.bans);
+      document.getElementById("banUser").value = "";
+      document.getElementById("banReason").value = "";
+      document.getElementById("banIps").value = "";
+    }).catch(function (e) {
+      msg.className = "msg err"; msg.textContent = e.message;
+    }).then(function () { btn.disabled = false; });
+  });
+
   function showApp() {
     document.getElementById("loginView").classList.add("hidden");
     document.getElementById("appView").classList.remove("hidden");
     api("/admin/api/settings").then(render).catch(function () {});
+    loadBans();
   }
 
   function signOut(reason) {

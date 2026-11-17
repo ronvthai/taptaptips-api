@@ -75,7 +75,7 @@ class SecurityConfig(
                     .requestMatchers(HttpMethod.POST, "/t/*/intent", "/t/*/complete").permitAll()
                     // Admin settings page: has its own password check (ADMIN_PASSWORD),
                     // not the app login. See AdminController.
-                    .requestMatchers(HttpMethod.GET, "/admin", "/admin/api/settings").permitAll()
+                    .requestMatchers(HttpMethod.GET, "/admin", "/admin/api/settings", "/admin/api/bans").permitAll()
                     .requestMatchers(HttpMethod.POST, "/admin/api/**").permitAll()
                     // Admin console (read-only reports): also its own password check
                     // (ADMIN_PASSWORD, X-Admin-Token header). See AdminConsoleController.
