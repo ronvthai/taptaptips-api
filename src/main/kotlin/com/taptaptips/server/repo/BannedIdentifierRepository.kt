@@ -9,4 +9,5 @@ interface BannedIdentifierRepository : JpaRepository<BannedIdentifier, UUID> {
     fun findByTypeAndValueIn(type: String, values: Collection<String>): List<BannedIdentifier>
     fun existsByTypeAndValue(type: String, value: String): Boolean
     fun findAllByOrderByCreatedAtDesc(): List<BannedIdentifier>
+    fun findBySourceUserId(sourceUserId: UUID): List<BannedIdentifier>
 }

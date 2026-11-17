@@ -249,6 +249,52 @@ class FraudGuardService(
         return BanResult(userId, user.email, added, already, payoutsPaused, notes)
     }
 
+    data class UnbanResult(
+        val userId: UUID,
+        val email: String,
+        val removed: List<String>,
+        val payoutsResumed: Boolean?,
+        val notes: List<String>
+    )
+
+    /**
+     * Undo [ban]: unsuspend the user, remove the ban-list entries that came
+     * from them, and turn their Stripe payouts back to automatic (daily).
+     *
+     * An entry shared with another banned user (e.g. the same bank account)
+     * is stored once, under whoever was banned first — so unbanning that
+     * first user removes it for both. Re-ban the other user to put it back.
+     */
+    fun unban(userId: UUID, actor: String): UnbanResult {
+        val user = users.findById(userId).orElseThrow { IllegalArgumentException("No user with id $userId") }
+        val notes = mutableListOf<String>()
+
+        val rows = banned.findBySourceUserId(userId)
+        rows.forEach { banned.delete(it) }
+        val removed = rows.map { "${it.type} ${it.value}" }
+
+        if (user.suspended) {
+            user.suspended = false
+            user.suspensionReason = null
+            user.suspendedAt = null
+            user.updatedAt = Instant.now()
+            users.save(user)
+        } else {
+            notes += "The account wasn't suspended."
+        }
+
+        var payoutsResumed: Boolean? = null
+        user.stripeAccountId?.let { acct ->
+            payoutsResumed = resumePayouts(acct)
+            if (payoutsResumed == false) notes += "Couldn't turn Stripe payouts back on (a rejected Stripe account " +
+                "can't be reopened). Check the account in the Stripe dashboard."
+        }
+        notes += "It can take up to a minute before they can log in again."
+
+        log.warn("🔓 UNBANNED user $userId (${user.email}) by $actor. Removed ${removed.size} identifiers: $removed")
+        return UnbanResult(userId, user.email, removed, payoutsResumed, notes)
+    }
+
     /** Take one identifier off the ban list (e.g. an IP that turned out to be shared). */
     fun unbanIdentifier(type: String, value: String, actor: String): Boolean {
         val row = banned.findByTypeAndValue(type.uppercase(), value.trim()) ?: return false
@@ -314,6 +360,32 @@ class FraudGuardService(
         true
     } catch (e: Exception) {
         log.error("Couldn't pause payouts for $accountId: ${e.message}")
+        false
+    }
+
+    /** Turns automatic (daily) payouts back on. */
+    private fun resumePayouts(accountId: String): Boolean = try {
+        Account.retrieve(accountId).update(
+            AccountUpdateParams.builder()
+                .setSettings(
+                    AccountUpdateParams.Settings.builder()
+                        .setPayouts(
+                            AccountUpdateParams.Settings.Payouts.builder()
+                                .setSchedule(
+                                    AccountUpdateParams.Settings.Payouts.Schedule.builder()
+                                        .setInterval(AccountUpdateParams.Settings.Payouts.Schedule.Interval.DAILY)
+                                        .build()
+                                )
+                                .build()
+                        )
+                        .build()
+                )
+                .build()
+        )
+        log.warn("▶️ Payouts set back to daily for $accountId")
+        true
+    } catch (e: Exception) {
+        log.error("Couldn't resume payouts for $accountId: ${e.message}")
         false
     }
 

@@ -20,7 +20,9 @@ import java.time.format.DateTimeFormatter
 import java.util.UUID
 
 /**
- * Read-only admin console.
+ * Admin dashboard: reports and users (read-only, here) plus the Settings and
+ * Fraud tabs, whose page lives in the same console files but whose API is
+ * AdminController (/admin/api/…, which accepts this console's session).
  *
  *   GET  /console                    the web page (login screen + reports)
  *   GET  /console/console.js|.css    its script and styles
@@ -33,7 +35,7 @@ import java.util.UUID
  *   GET  /console/api/users/{id}/avatar
  *
  * Every /console/api call except login needs the X-Admin-Token header from
- * login. Nothing here writes to the database.
+ * login. Nothing in THIS controller writes to the database.
  *
  * SecurityConfig must permit "/console" and everything under "/console/" —
  * this controller does its own authentication (AdminConsoleAuth).

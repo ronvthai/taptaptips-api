@@ -16,7 +16,7 @@
       <input id="password" type="password" autocomplete="current-password" required autofocus>
       <button type="submit" id="login-btn">Sign in</button>
       <p id="login-error" class="error" role="alert"></p>
-      <p class="hint">Read-only. Sessions last 8 hours.</p>
+      <p class="hint">Sessions last 8 hours.</p>
     </form>
   </main>
 
@@ -27,6 +27,8 @@
       <nav class="tabs" aria-label="Sections">
         <a href="#/overview" data-tab="overview">Overview</a>
         <a href="#/users" data-tab="users">Users</a>
+        <a href="#/settings" data-tab="settings">Settings</a>
+        <a href="#/fraud" data-tab="fraud">Fraud</a>
       </nav>
       <div class="topbar-actions">
         <span id="updated" class="muted small"></span>
@@ -152,6 +154,35 @@
     <section id="user-view" class="page" hidden>
       <a href="#/users" id="back-link" class="back">← All users</a>
       <div id="user-detail"></div>
+    </section>
+
+    <!-- Settings (formerly /admin) -->
+    <section id="settings-view" class="page narrow" hidden>
+      <p class="muted">Changes apply within about 30 seconds. No redeploy needed.</p>
+      <p id="settings-error" class="error" role="alert"></p>
+      <div id="settings-groups"></div>
+    </section>
+
+    <!-- Fraud -->
+    <section id="fraud-view" class="page narrow" hidden>
+      <h2 class="section-title">Ban a user</h2>
+      <div class="panel">
+        <p class="muted small">Suspends the account, pauses its Stripe payouts, and puts its email, every internet
+          address it has used and its payout bank account on the ban list. New accounts that match are refused,
+          suspended or flagged automatically. The reason is private: the user only sees
+          “Violation of Terms of Service”. You can also ban from a user's page.</p>
+        <form id="ban-form" class="stack" autocomplete="off">
+          <input id="ban-user" type="text" placeholder="User ID" aria-label="User ID">
+          <input id="ban-reason" type="text" placeholder="Reason (private)" aria-label="Reason">
+          <input id="ban-ips" type="text" placeholder="Extra IP addresses, comma-separated (optional)" aria-label="Extra IP addresses">
+          <div><button type="submit" id="ban-btn" class="danger">Ban user</button></div>
+          <p id="ban-msg" class="msg" role="status"></p>
+        </form>
+      </div>
+
+      <h2 class="section-title">Ban list</h2>
+      <p id="bans-error" class="error" role="alert"></p>
+      <div id="ban-list" class="panel list"></div>
     </section>
 
     <div id="toast" class="toast" role="status" hidden></div>

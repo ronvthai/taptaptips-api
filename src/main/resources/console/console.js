@@ -1,4 +1,5 @@
-/* TapTapTips admin console — read-only. All data is rendered with textContent
+/* TapTapTips admin dashboard: reports, users, settings and the ban list.
+ * All data is rendered with textContent
  * (never innerHTML), since display names and emails are user-typed. */
 (function () {
   "use strict";
@@ -137,21 +138,25 @@
 
   $("refresh-btn").addEventListener("click", () => { cache.overview = null; route(true); });
 
-  // ── routing (#/overview, #/users, #/user/<id>) ────────────────────────────
+  // ── routing (#/overview, #/users, #/user/<id>, #/settings, #/fraud) ──────
   const cache = { overview: null };
   function route(force) {
     if (!getToken()) return showLogin();
     const parts = (location.hash || "#/overview").split("/");
     let page = parts[1] || "overview";
     const arg = parts[2];
-    if (!["overview", "users", "user"].includes(page) || (page === "user" && !arg)) page = "overview";
+    if (!["overview", "users", "user", "settings", "fraud"].includes(page) || (page === "user" && !arg)) page = "overview";
     document.querySelectorAll(".tabs a").forEach((a) => a.classList.toggle("on",
       a.dataset.tab === page || (page === "user" && a.dataset.tab === "users")));
     $("overview-view").hidden = page !== "overview";
     $("users-view").hidden = page !== "users";
     $("user-view").hidden = page !== "user";
+    $("settings-view").hidden = page !== "settings";
+    $("fraud-view").hidden = page !== "fraud";
     window.scrollTo(0, 0);
     if (page === "users") loadUsers();
+    else if (page === "settings") loadSettings();
+    else if (page === "fraud") loadBans();
     else if (page === "user") loadUser(decodeURIComponent(arg));
     else loadOverview(force);
   }
@@ -511,6 +516,8 @@
           s.suspended ? el("span", { class: "badge bad", text: "Suspended" }) : null,
           s.platforms.map((x) => el("span", { class: "badge", text: x === "ios" ? "iPhone" : "Android" }))))));
 
+    host.append(adminActions(s));
+
     host.append(el("div", { class: "cards" },
       card("Tips sent", usd(s.sentCents), num(s.sentCount) + " completed"),
       card("Tips received", usd(s.recvCents), num(s.recvCount) + " completed"),
@@ -592,6 +599,247 @@
         { label: "Updated", render: (r) => dateTime(r.updated) },
         { label: "Working", render: (r) => (r.active ? el("span", { class: "badge good", text: "Yes" }) : el("span", { class: "badge bad", text: "No" })) }
       ], d.pushTokens, "No push tokens — this user won't get notifications."))));
+  }
+
+  // ── Writes (settings + ban list, served by /admin/api) ────────────────────
+  // Same session as the reports. The server also needs ADMIN_PASSWORD to be
+  // 16+ characters for anything that changes data; otherwise it answers 503.
+  async function postJson(path, body) {
+    const res = await api(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {})
+    });
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error(data.error || ("Request failed (" + res.status + ")"));
+    return data;
+  }
+  function showMsg(node, text, kind) {
+    node.className = "msg" + (kind ? " " + kind : "");
+    node.textContent = text || "";
+  }
+
+  // ── Settings ──────────────────────────────────────────────────────────────
+  function settingShow(s, v) {
+    if (s.type === "BOOL") return v === "true" ? "On" : "Off";
+    if (s.type === "CENTS") return usd(Number(v));
+    return v;
+  }
+
+  async function loadSettings() {
+    const host = $("settings-groups");
+    $("settings-error").textContent = "";
+    if (!host.firstChild) host.append(el("p", { class: "muted", text: "Loading…" }));
+    try {
+      renderSettings(await getJson("/admin/api/settings"));
+    } catch (e) {
+      if (e.message !== "unauthorized") { clear(host); $("settings-error").textContent = e.message; }
+    }
+  }
+
+  function renderSettings(list) {
+    const host = clear($("settings-groups"));
+    const order = [];
+    const byGroup = {};
+    list.forEach((s) => {
+      if (!byGroup[s.group]) { byGroup[s.group] = []; order.push(s.group); }
+      byGroup[s.group].push(s);
+    });
+    order.forEach((g) => {
+      host.append(el("h2", { class: "section-title", text: g }),
+        el("div", { class: "panel list" }, byGroup[g].map(settingRow)));
+    });
+  }
+
+  function settingRow(s) {
+    const msg = el("p", { class: "msg", role: "status" });
+    async function save(value, control) {
+      if (control) control.disabled = true;
+      showMsg(msg, "Saving…");
+      try {
+        renderSettings(await postJson("/admin/api/settings", { key: s.key, value: String(value) }));
+        toast("Saved");
+      } catch (e) {
+        if (e.message === "unauthorized") return;
+        showMsg(msg, e.message, "err");
+        if (control) {
+          control.disabled = false;
+          if (control.type === "checkbox") control.checked = !control.checked;
+        }
+      }
+    }
+
+    const head = el("div", { class: "setting-head" }, el("div", { class: "setting-label", text: s.label }));
+    const row = el("div", { class: "setting" }, head);
+
+    if (s.type === "BOOL") {
+      const cb = el("input", { type: "checkbox", "aria-label": s.label });
+      cb.checked = s.value === "true";
+      cb.addEventListener("change", () => {
+        if (!cb.checked && !confirm("Turn off “" + s.label + "”?")) { cb.checked = true; return; }
+        save(cb.checked ? "true" : "false", cb);
+      });
+      head.append(el("label", { class: "switch" }, cb, el("span", { class: "slider" })));
+    } else {
+      const input = el("input", { "aria-label": s.label });
+      let field = input;
+      if (s.type === "CENTS") {
+        input.type = "number"; input.step = "0.01"; input.min = "0";
+        input.value = (Number(s.value) / 100).toFixed(2);
+        field = el("div", { class: "money" }, el("span", { text: "$" }), input);
+      } else if (s.type === "NUMBER") {
+        input.type = "number"; input.step = "1"; input.value = s.value;
+      } else {
+        input.type = "text"; input.value = s.value;
+      }
+      const btn = el("button", { type: "button", text: "Save" });
+      btn.addEventListener("click", () => {
+        let v = input.value.trim();
+        if (s.type === "CENTS") {
+          const n = Math.round(parseFloat(v) * 100);
+          if (isNaN(n)) { showMsg(msg, "Enter an amount.", "err"); return; }
+          v = String(n);
+        }
+        save(v, btn);
+      });
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") btn.click(); });
+      row.append(el("div", { class: "setting-edit" }, field, btn));
+    }
+
+    row.append(el("p", { class: "setting-help", text: s.help }));
+    const meta = el("div", { class: "setting-meta" });
+    if (s.overridden) {
+      meta.append(el("span", { class: "badge warn", text: "Changed " + dateTime(s.updatedAt) }),
+        el("span", { text: "Default: " + settingShow(s, s.defaultValue) }),
+        el("button", { type: "button", class: "ghost small-btn", text: "Reset to default", onclick: async () => {
+          if (!confirm("Reset “" + s.label + "” to " + settingShow(s, s.defaultValue) + "?")) return;
+          try { renderSettings(await postJson("/admin/api/settings/reset", { key: s.key })); toast("Reset"); }
+          catch (e) { if (e.message !== "unauthorized") showMsg(msg, e.message, "err"); }
+        } }));
+    } else {
+      meta.append(el("span", { text: "Using default" }));
+    }
+    row.append(meta, msg);
+    return row;
+  }
+
+  // ── Fraud: ban list ───────────────────────────────────────────────────────
+  async function loadBans() {
+    $("bans-error").textContent = "";
+    try { renderBans(await getJson("/admin/api/bans")); }
+    catch (e) { if (e.message !== "unauthorized") $("bans-error").textContent = e.message; }
+  }
+
+  function renderBans(list) {
+    const host = clear($("ban-list"));
+    if (!list.length) { host.append(el("p", { class: "muted", text: "Nothing banned yet." })); return; }
+    list.forEach((b) => {
+      host.append(el("div", { class: "ban-row" },
+        el("div", { class: "ban-main" },
+          el("div", null, el("span", { class: "badge bad", text: b.type }), " ", el("span", { class: "mono", text: b.value })),
+          el("div", { class: "muted small" },
+            b.reason || "",
+            b.sourceUserId ? el("span", null, " · ", el("a", { href: "#/user/" + b.sourceUserId, text: "view user" })) : null,
+            " · added " + dateTime(b.createdAt))),
+        el("button", { type: "button", class: "ghost small-btn", text: "Remove", onclick: async () => {
+          if (!confirm("Take " + b.type + " " + b.value + " off the ban list?")) return;
+          try { renderBans(await postJson("/admin/api/bans/remove", { type: b.type, value: b.value })); toast("Removed"); }
+          catch (e) { if (e.message !== "unauthorized") toast(e.message); }
+        } })));
+    });
+  }
+
+  function splitIps(text) {
+    return (text || "").split(",").map((x) => x.trim()).filter((x) => x.length > 0);
+  }
+  function banSummary(r) {
+    const lines = ["Banned " + r.email + ". Added " + r.added.length + " to the ban list" +
+      (r.alreadyBanned.length ? " (" + r.alreadyBanned.length + " were already on it)." : ".")];
+    if (r.payoutsPaused === true) lines.push("Stripe payouts paused.");
+    (r.notes || []).forEach((n) => lines.push(n));
+    return lines.join(" ");
+  }
+  function unbanSummary(r) {
+    const lines = ["Unbanned " + r.email + ". Removed " + r.removed.length + " from the ban list."];
+    if (r.payoutsResumed === true) lines.push("Stripe payouts turned back on.");
+    (r.notes || []).forEach((n) => lines.push(n));
+    return lines.join(" ");
+  }
+
+  $("ban-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = $("ban-msg");
+    const userId = $("ban-user").value.trim();
+    const reason = $("ban-reason").value.trim();
+    if (!userId || !reason) { showMsg(msg, "Enter a user ID and a reason.", "err"); return; }
+    if (!confirm("Ban user " + userId + "? This suspends the account and pauses its payouts.")) return;
+    const btn = $("ban-btn");
+    btn.disabled = true;
+    showMsg(msg, "Banning…");
+    try {
+      const j = await postJson("/admin/api/ban", { userId, reason, extraIps: splitIps($("ban-ips").value) });
+      showMsg(msg, banSummary(j.result), "ok");
+      renderBans(j.bans);
+      $("ban-user").value = ""; $("ban-reason").value = ""; $("ban-ips").value = "";
+      cache.overview = null;
+    } catch (err) {
+      if (err.message !== "unauthorized") showMsg(msg, err.message, "err");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Ban / unban box on a user's page.
+  function adminActions(s) {
+    const msg = el("p", { class: "msg", role: "status" });
+    const box = el("div", { class: "panel" }, el("h3", { text: "Admin actions" }));
+
+    if (s.suspended) {
+      const btn = el("button", { type: "button", text: "Unban" });
+      btn.addEventListener("click", async () => {
+        if (!confirm("Unban " + (s.email || s.id) + "? This unsuspends the account, removes its ban-list entries " +
+          "and turns its Stripe payouts back on.")) return;
+        btn.disabled = true;
+        showMsg(msg, "Unbanning…");
+        try {
+          const j = await postJson("/admin/api/unban", { userId: s.id });
+          cache.overview = null;
+          toast("Unbanned");
+          loadUser(s.id).then(() => { const m = document.querySelector("#user-detail .admin-msg"); if (m) showMsg(m, unbanSummary(j.result), "ok"); });
+        } catch (e) {
+          btn.disabled = false;
+          if (e.message !== "unauthorized") showMsg(msg, e.message, "err");
+        }
+      });
+      box.append(el("p", { class: "muted small", text: "This account is suspended. Unbanning removes the ban-list " +
+        "entries that came from it — including any it shares with another banned account (like the same bank) — " +
+        "and turns its Stripe payouts back on." }), el("div", null, btn));
+    } else {
+      const reason = el("input", { type: "text", placeholder: "Reason (private)", "aria-label": "Reason" });
+      const ips = el("input", { type: "text", placeholder: "Extra IP addresses, comma-separated (optional)", "aria-label": "Extra IP addresses" });
+      const btn = el("button", { type: "button", class: "danger", text: "Ban this user" });
+      btn.addEventListener("click", async () => {
+        if (!reason.value.trim()) { showMsg(msg, "Enter a reason.", "err"); return; }
+        if (!confirm("Ban " + (s.email || s.id) + "? This suspends the account and pauses its payouts.")) return;
+        btn.disabled = true;
+        showMsg(msg, "Banning…");
+        try {
+          const j = await postJson("/admin/api/ban", { userId: s.id, reason: reason.value.trim(), extraIps: splitIps(ips.value) });
+          cache.overview = null;
+          toast("Banned");
+          loadUser(s.id).then(() => { const m = document.querySelector("#user-detail .admin-msg"); if (m) showMsg(m, banSummary(j.result), "ok"); });
+        } catch (e) {
+          btn.disabled = false;
+          if (e.message !== "unauthorized") showMsg(msg, e.message, "err");
+        }
+      });
+      box.append(el("p", { class: "muted small", text: "Suspends the account, pauses its Stripe payouts and puts its " +
+        "email, internet addresses and payout bank on the ban list. The user only sees “Violation of Terms of Service”." }),
+        el("div", { class: "stack" }, reason, ips, el("div", null, btn)));
+    }
+    msg.classList.add("admin-msg");
+    box.append(msg);
+    return box;
   }
 
   // ── start ─────────────────────────────────────────────────────────────────
