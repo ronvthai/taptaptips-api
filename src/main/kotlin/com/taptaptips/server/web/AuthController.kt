@@ -4,6 +4,7 @@ import com.taptaptips.server.domain.AppUser
 import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.security.ClientIp
 import com.taptaptips.server.security.JwtService
+import com.taptaptips.server.security.RefreshTokenService
 import com.taptaptips.server.service.FraudGuardService
 import jakarta.servlet.http.HttpServletRequest
 import com.taptaptips.server.service.DisplayNameModerator
@@ -31,7 +32,8 @@ class AuthController(
     private val nameModerator: DisplayNameModerator,
     private val referralService: ReferralService,
     private val fraudGuard: FraudGuardService,
-    private val clientIp: ClientIp
+    private val clientIp: ClientIp,
+    private val refreshTokens: RefreshTokenService
 ) {
     private val pwd: PasswordEncoder = BCryptPasswordEncoder()
 
@@ -53,6 +55,9 @@ class AuthController(
     }
 
     data class LoginReq(val email: String, val password: String)
+
+    /** Body of POST /auth/token and POST /auth/logout. */
+    data class RefreshReq(val refreshToken: String? = null)
 
     data class ErrorResponse(
         val error: String,
@@ -201,6 +206,7 @@ class AuthController(
 
             ResponseEntity.ok(mapOf(
                 "accessToken"             to jwt.issueAccess(u.id),
+                "refreshToken"            to issueRefreshSafely(u.id, request),
                 "userId"                  to u.id.toString(),
                 "username"                to u.displayName,
                 "wantsToReceiveTips"      to u.wantsToReceiveTips,
@@ -228,7 +234,13 @@ class AuthController(
      * we get here), so this never extends a dead session.
      */
     @PostMapping("/refresh")
-    fun refresh(): ResponseEntity<Any> {
+    fun refresh(
+        // Sent by app builds that understand refresh tokens, so a session
+        // signed in before the update gets one without logging in again.
+        // Older builds don't send it and get the original response.
+        @RequestParam(name = "upgrade", required = false, defaultValue = "false") upgrade: Boolean,
+        request: HttpServletRequest
+    ): ResponseEntity<Any> {
         val uid = SecurityContextHolder.getContext().authentication?.name
             ?.let { runCatching { UUID.fromString(it) }.getOrNull() }
             ?: return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
@@ -249,7 +261,77 @@ class AuthController(
             ))
         }
 
+        if (upgrade) {
+            return ResponseEntity.ok(mapOf(
+                "accessToken"  to jwt.issueAccess(uid),
+                "refreshToken" to issueRefreshSafely(uid, request)
+            ))
+        }
         return ResponseEntity.ok(mapOf("accessToken" to jwt.issueAccess(uid)))
+    }
+
+    /**
+     * Long-lived sign-in: swap a refresh token for a new access token AND a new
+     * refresh token (the old one is retired). Works even when the access token
+     * has long expired — this is what keeps people signed in for weeks instead
+     * of minutes. Public (no Bearer needed). See RefreshTokenService.
+     *
+     * 401 → the refresh token is unknown / expired / revoked / reused, or the
+     *       account is gone or suspended. The app should show the login screen.
+     */
+    @PostMapping("/token")
+    fun token(@RequestBody(required = false) r: RefreshReq?): ResponseEntity<Any> {
+        val raw = r?.refreshToken?.trim().orEmpty()
+        val result = try {
+            refreshTokens.rotate(raw)
+        } catch (e: Exception) {
+            // Database hiccup is NOT "session dead" — 503 so the app retries
+            // instead of logging the user out.
+            logger.error("❌ Refresh token rotation failed", e)
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(ErrorResponse(error = "Try again", message = "Couldn't refresh your session. Please try again."))
+        }
+
+        if (result !is RefreshTokenService.RotateResult.Ok) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(ErrorResponse(
+                error = "Session expired",
+                message = "Please sign in again."
+            ))
+        }
+
+        val uid = result.userId
+        if (!userRepo.existsById(uid)) {
+            refreshTokens.revokeAllForUser(uid)
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                .body(ErrorResponse(error = "Unauthorized"))
+        }
+        if (userRepo.findSuspendedById(uid) == true) {
+            logger.warn("🚫 Token refresh refused: user $uid is suspended")
+            refreshTokens.revokeAllForUser(uid)
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(ErrorResponse(
+                error = "Account suspended",
+                message = SUSPENDED_MESSAGE
+            ))
+        }
+
+        return ResponseEntity.ok(mapOf(
+            "accessToken"  to jwt.issueAccess(uid),
+            "refreshToken" to result.refreshToken
+        ))
+    }
+
+    /**
+     * Sign out this device: revokes its refresh token so a copy of it can't be
+     * used later. Public and always 204 — the app clears its own storage
+     * whether or not this call succeeds.
+     */
+    @PostMapping("/logout")
+    fun logout(@RequestBody(required = false) r: RefreshReq?): ResponseEntity<Void> {
+        r?.refreshToken?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            runCatching { refreshTokens.revoke(it) }
+                .onFailure { e -> logger.warn("Logout revoke failed: ${e.message}") }
+        }
+        return ResponseEntity.noContent().build()
     }
 
     @PostMapping("/login")
@@ -341,6 +423,7 @@ class AuthController(
 
             ResponseEntity.ok(mapOf(
                 "accessToken"              to jwt.issueAccess(u.id),
+                "refreshToken"             to issueRefreshSafely(u.id, request),
                 "userId"                   to u.id.toString(),
                 "username"                 to u.displayName,
                 "wantsToReceiveTips"       to u.wantsToReceiveTips,
@@ -357,8 +440,20 @@ class AuthController(
         }
     }
 
+    /**
+     * A refresh-token problem must never fail a login that otherwise worked —
+     * older behaviour (short session) is the fallback, signalled by null.
+     */
+    private fun issueRefreshSafely(userId: UUID, request: HttpServletRequest): String? =
+        try {
+            refreshTokens.issue(userId, request.getHeader("User-Agent"))
+        } catch (e: Exception) {
+            logger.error("❌ Could not issue refresh token for $userId", e)
+            null
+        }
+
     private fun isValidEmail(email: String): Boolean {
         val emailRegex = "^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$".toRegex()
         return email.matches(emailRegex)
     }
-}
+}

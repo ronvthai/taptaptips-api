@@ -165,6 +165,16 @@ class RateLimitFilter(
                 )
             }
 
+            path == "/auth/token" && method == "POST" -> {
+                val ip = getClientIp(request)
+                RateLimitInfo(
+                    bucket = rateLimiterService.resolveTokenRefreshBucket(ip),
+                    key = ip,
+                    type = "token-refresh",
+                    userMessage = "Too many requests. Please wait a moment and try again."
+                )
+            }
+
             path == "/auth/password/forgot" && method == "POST" -> {
                 val ip = getClientIp(request)
                 RateLimitInfo(
@@ -296,4 +306,4 @@ class RateLimitFilter(
         val type: String,
         val userMessage: String
     )
-}
+}

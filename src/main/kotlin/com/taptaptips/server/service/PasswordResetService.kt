@@ -4,6 +4,7 @@ import com.taptaptips.server.domain.AppUser
 import com.taptaptips.server.domain.PasswordResetToken
 import com.taptaptips.server.repo.AppUserRepository
 import com.taptaptips.server.repo.PasswordResetTokenRepository
+import com.taptaptips.server.security.RefreshTokenService
 import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.security.crypto.password.PasswordEncoder
@@ -17,7 +18,8 @@ class PasswordResetService(
     private val userRepo: AppUserRepository,
     private val tokenRepo: PasswordResetTokenRepository,
     private val emailService: EmailService,
-    private val passwordEncoder: PasswordEncoder
+    private val passwordEncoder: PasswordEncoder,
+    private val refreshTokens: RefreshTokenService
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
     
@@ -109,8 +111,11 @@ class PasswordResetService(
         resetToken.used = true
         resetToken.usedAt = Instant.now()
         tokenRepo.save(resetToken)
-        
-        logger.info("✅ Password reset successful for user ${user.id}")
+
+        // New password → every signed-in device has to sign in again with it.
+        val revoked = refreshTokens.revokeAllForUser(user.id)
+
+        logger.info("✅ Password reset successful for user ${user.id} (signed out $revoked device session(s))")
         
         return true
     }

@@ -39,7 +39,8 @@ class UserController(
     private val stripeService: StripePaymentService,
     private val heldTipService: HeldTipService,
     private val heldTips: HeldTipRepository,
-    private val nameModerator: DisplayNameModerator
+    private val nameModerator: DisplayNameModerator,
+    private val refreshTokens: com.taptaptips.server.security.RefreshTokenService
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     private val encoder = BCryptPasswordEncoder()
@@ -111,6 +112,10 @@ class UserController(
         // 1. FCM tokens — stop push delivery before anything else
         fcmTokens.deleteByUser_Id(id)
         log.info("   ✓ FCM tokens deleted")
+
+        // 2. Sign-in sessions (refresh tokens) — no device can renew access
+        refreshTokens.deleteAllForUser(id)
+        log.info("   ✓ Sign-in sessions deleted")
 
         // 3. Devices (Ed25519 public keys)
         val userDevices = devices.findAllByUser_Id(id)
@@ -429,4 +434,4 @@ class UserController(
         }
         return ResponseEntity.ok(mapOf("status" to "OK"))
     }
-}
+}

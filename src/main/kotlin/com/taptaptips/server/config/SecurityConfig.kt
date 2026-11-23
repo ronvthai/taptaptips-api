@@ -58,6 +58,9 @@ class SecurityConfig(
                     .requestMatchers("/actuator/health", "/actuator/info").permitAll()
                     .requestMatchers("/.well-known/**").permitAll()
                     .requestMatchers(HttpMethod.POST, "/auth/register", "/auth/login").permitAll()
+                    // Refresh-token exchange and sign-out carry no access token
+                    // (it may have expired long ago) — see RefreshTokenService.
+                    .requestMatchers(HttpMethod.POST, "/auth/token", "/auth/logout").permitAll()
                     .requestMatchers(HttpMethod.POST, "/auth/password/forgot").permitAll()
                     .requestMatchers(HttpMethod.POST, "/auth/password/validate-token").permitAll()
                     .requestMatchers(HttpMethod.POST, "/auth/password/reset").permitAll()
@@ -127,4 +130,4 @@ class SecurityConfig(
      */
     @Bean
     fun userDetailsService(): UserDetailsService = InMemoryUserDetailsManager()
-}
+}

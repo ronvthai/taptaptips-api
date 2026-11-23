@@ -40,6 +40,16 @@ class RateLimiterService(
         cacheManager.getCache("rateLimitBuckets")?.evict("login-acct-$emailKey")
     }
 
+    /**
+     * Refresh-token exchange (POST /auth/token): 60 per 5 minutes per IP.
+     * Tokens are 256-bit random so guessing is hopeless; this only stops
+     * hammering. Generous because a busy venue puts many phones behind one IP.
+     */
+    @Cacheable(value = ["rateLimitBuckets"], key = "'auth-token-' + #key")
+    fun resolveTokenRefreshBucket(key: String): Bucket = Bucket.builder()
+        .addLimit(Bandwidth.classic(60, Refill.intervally(60, Duration.ofMinutes(5))))
+        .build()
+
     /** Registration: 3 per 10 minutes per IP. */
     @Cacheable(value = ["rateLimitBuckets"], key = "'register-' + #key")
     fun resolveRegistrationBucket(key: String): Bucket = Bucket.builder()
@@ -87,4 +97,4 @@ class RateLimiterService(
     fun resolveGeneralApiBucket(key: String): Bucket = Bucket.builder()
         .addLimit(Bandwidth.classic(100, Refill.intervally(100, Duration.ofMinutes(1))))
         .build()
-}
+}
