@@ -42,16 +42,22 @@ import java.util.concurrent.TimeUnit
  * truth after a restart. Every DB call is best-effort — if the table is
  * unavailable we fall back to the old in-memory behaviour, never fail a request.
  *
- * The expiry is a sliding window (default 72 h, `ble.token-ttl-hours`). It used
- * to be 10 h, so a phone left untouched overnight was undiscoverable the next
- * morning until its owner opened the app.
+ * The expiry is a sliding window (default 30 days, `ble.token-ttl-hours`).
+ * It was 10 h, then 72 h — but an iPhone can only renew its token when the
+ * app is opened (a backgrounded iOS app gets no time to call us), so a phone
+ * whose owner hadn't opened TapTapTips for 3 days kept advertising a token we
+ * no longer recognised: Android read it over GATT, /ble/resolve dropped it,
+ * and the phone was invisible. 30 days matches how long a sign-in lasts
+ * (refresh tokens: 60 days idle), so anyone still signed in stays findable.
+ * The token is still deleted on logout / replaced on re-login, and rotates
+ * after 30 days without the app being opened.
  */
 @RestController
 @RequestMapping("/ble")
 class BleTokenController(
     private val users: AppUserRepository,
     private val jdbc: JdbcTemplate,
-    @Value("\${ble.token-ttl-hours:72}") private val tokenTtlHours: Long,
+    @Value("\${ble.token-ttl-hours:720}") private val tokenTtlHours: Long,
     /**
      * The TapTapTips bit(s) in Apple's background "overflow" advertisement, as
      * 32 hex chars. Android logs "BLE: learned iOS overflow bits <hex>
